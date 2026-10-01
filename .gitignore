@@ -1,0 +1,20 @@
+target/
+
+# Rust build artifacts
+Cargo.lock
+*.rs.bk
+
+# Environment and local configuration
+.env
+.env.*
+!.env.example
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Operating system files
+.DS_Store
+Thumbs.db
