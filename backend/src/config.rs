@@ -4,6 +4,7 @@ use std::env;
 pub struct Config {
     pub port : u16,
     pub secret: String,
+    pub database_url: String,
 }
 
 impl Config {
@@ -17,6 +18,8 @@ impl Config {
                 .expect("PORT must be a valid number"),
             secret: env::var("JWT_SECRET")
                 .expect("JWT_SECRET environment variable must be set"),
+            database_url: env::var("DATABASE_URL")
+                .expect("DATABASE_URL environment variable must be set"),
         }
     }
 }
