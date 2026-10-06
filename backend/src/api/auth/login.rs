@@ -79,6 +79,7 @@ pub async fn login(
     if !is_password_valid {
         return Err(AppError::BadRequest.with_message("Invalid email or password".to_string()));
     }
+    // TODO: come the unverified user status flow
     let access_token = jwt::create_token(jwt::TokenType::Access);
     let refresh_token = jwt::create_token(jwt::TokenType::Refresh);
     Ok((

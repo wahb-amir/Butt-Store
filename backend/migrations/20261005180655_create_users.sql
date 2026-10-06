@@ -4,6 +4,7 @@ CREATE TYPE user_status AS ENUM ('verified', 'unverified', 'banned','suspended')
 CREATE TABLE users (
     id UUID PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
     password TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'user',
     status user_status NOT NULL DEFAULT 'unverified',
