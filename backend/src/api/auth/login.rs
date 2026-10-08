@@ -71,6 +71,7 @@ pub async fn login(
     })?;
 
     let is_password_valid = verify_password(&payload.password, &password_hash)
+        .await
         .map_err(|e| {
             eprintln!("Password verification error: {:?}", e);
             AppError::Internal.with_message("Unable to verify password")
@@ -79,9 +80,8 @@ pub async fn login(
     if !is_password_valid {
         return Err(AppError::BadRequest.with_message("Invalid email or password".to_string()));
     }
-    // TODO: come the unverified user status flow
-    let access_token = jwt::create_token(jwt::TokenType::Access);
-    let refresh_token = jwt::create_token(jwt::TokenType::Refresh);
+    let access_token = jwt::create_token(user.id,jwt::TokenType::Access);
+    let refresh_token = jwt::create_token(user.id,jwt::TokenType::Refresh);
     Ok((
         StatusCode::OK,
         Json(LoginResponse {

@@ -9,7 +9,7 @@ use argon2::{
     Argon2,
 };
 
-pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
+pub async fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
     let salt = SaltString::generate(&mut OsRng);
 
     let argon2 = Argon2::default();
@@ -21,7 +21,7 @@ pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Er
     Ok(password_hash)
 }
 
-pub fn verify_password(
+pub async fn verify_password(
     password: &str,
     password_hash: &str,
 ) -> Result<bool, argon2::password_hash::Error> {

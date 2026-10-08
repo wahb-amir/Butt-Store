@@ -2,10 +2,10 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation}
 use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use std::time::{SystemTime, UNIX_EPOCH};
-
+use uuid::Uuid;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Payload {
-    sub: String,
+    sub: Uuid,
     exp: usize,
     iat: usize,
 }
@@ -20,7 +20,7 @@ fn config() -> Config {
 }
 
 
-pub fn create_token(token_type: TokenType) -> String {
+pub fn create_token(userId:Uuid,token_type: TokenType) -> String {
     const ACCESS_TOKEN_LIFETIME: u64 = 15 * 60;
     const REFRESH_TOKEN_LIFETIME: u64 = 7 * 24 * 60 * 60;
 
@@ -35,7 +35,7 @@ pub fn create_token(token_type: TokenType) -> String {
     };
 
     let payload = Payload {
-        sub: "user_id".to_string(),
+        sub: userId,
         iat: issued_at as usize,
         exp: (issued_at + lifetime) as usize,
     };

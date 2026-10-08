@@ -42,12 +42,13 @@ pub async fn register(
     if let Err(e) = validate::validate_password(password) {
         return Err(e);
     }
-    let password_hash: String = hash_password(password).map_err(|e| {
+
+    let password_hash: String = hash_password(password).await.map_err(|e| {
         eprintln!("Password hashing error: {:?}", e);
         AppError::Internal.with_message("Unable to hash password")
     })?;
-    
-       query_as::<_, User>(
+    let user_id:Uuid = Uuid::new_v4();
+    query_as::<_, User>(
         r#"
         INSERT INTO users (
             id,
@@ -65,29 +66,34 @@ pub async fn register(
             password AS password_hash
         "#,
     )
-    .bind(Uuid::new_v4())
+    .bind(user_id)
     .bind(&payload.email)
     .bind(&payload.name)
     .bind(&password_hash)
     .bind("verified")
     .fetch_one(&state.db)
     .await
-    .map_err(|e| {
-        eprintln!("Database error: {:?}", e);
-
+    .map_err(|e: sqlx::Error| {
         if let sqlx::Error::Database(db_error) = &e {
-            if db_error.constraint() == Some("users_email_unique") {
+            if db_error.code().as_deref() == Some("23505")
+                && matches!(
+                    db_error.constraint(),
+                    Some("users_email_unique") | Some("users_email_key")
+                )
+            {
                 return AppError::Duplicate
                     .with_message("An account with this email already exists");
             }
         }
 
+        eprintln!("Database error: {:?}", e);
         AppError::Internal.with_message("Database error")
     })?;
 
-   
-    let access_token = jwt::create_token(jwt::TokenType::Access);
-    let refresh_token = jwt::create_token(jwt::TokenType::Refresh);
+    let access_token = jwt::create_token(user_id,jwt::TokenType::Access);
+
+    let refresh_token = jwt::create_token(user_id,jwt::TokenType::Refresh);
+
     Ok((
         StatusCode::OK,
         Json(RegisterResponse {
