@@ -1,3 +1,11 @@
+use crate::types::users::User;
+use crate::utils::jwt;
+use crate::utils::password::verify_password;
+use crate::{
+    errors::{AppError, AppErrorWithMessage},
+    state::AppState,
+    utils::validate,
+};
 use axum::{
     extract::{Json, State},
     http::StatusCode,
@@ -5,14 +13,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::query_as;
 use validator::Validate;
-use crate::utils::password::verify_password;
-use crate::utils::jwt;
-use crate::{
-    errors::{AppError, AppErrorWithMessage},
-    state::AppState,
-    utils::validate,
-};
-use crate::types::users::User;
 #[derive(Deserialize, Validate)]
 pub struct LoginRequest {
     #[validate(email(message = "Invalid email format"))]
@@ -23,8 +23,8 @@ pub struct LoginRequest {
 #[derive(Serialize)]
 pub struct LoginResponse {
     pub message: String,
-    access_token:String,
-    refresh_token:String
+    access_token: String,
+    refresh_token: String,
 }
 
 pub async fn login(
@@ -76,18 +76,18 @@ pub async fn login(
             eprintln!("Password verification error: {:?}", e);
             AppError::Internal.with_message("Unable to verify password")
         })?;
-    
+
     if !is_password_valid {
         return Err(AppError::BadRequest.with_message("Invalid email or password".to_string()));
     }
-    let access_token = jwt::create_token(user.id,jwt::TokenType::Access);
-    let refresh_token = jwt::create_token(user.id,jwt::TokenType::Refresh);
+    let access_token = jwt::create_token(user.id, jwt::TokenType::Access);
+    let refresh_token = jwt::create_token(user.id, jwt::TokenType::Refresh);
     Ok((
         StatusCode::OK,
         Json(LoginResponse {
             message: "Login successful".to_string(),
-            access_token:access_token,
-            refresh_token:refresh_token
+            access_token: access_token,
+            refresh_token: refresh_token,
         }),
     ))
 }

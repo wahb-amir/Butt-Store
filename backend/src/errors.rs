@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Serialize;
 
@@ -46,32 +46,17 @@ fn status_code(error: &AppError) -> StatusCode {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            AppError::Unauthorized => (
-                StatusCode::UNAUTHORIZED,
-                "Unauthorized".to_owned(),
-            ),
-            AppError::BadRequest => (
-                StatusCode::BAD_REQUEST,
-                "Bad request".to_owned(),
-            ),
-            AppError::NotFound => (
-                StatusCode::NOT_FOUND,
-                "Resource not found".to_owned(),
-            ),
-            AppError::Duplicate => (
-                StatusCode::CONFLICT,
-                "Resource already exists".to_owned(),
-            ),
+            AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized".to_owned()),
+            AppError::BadRequest => (StatusCode::BAD_REQUEST, "Bad request".to_owned()),
+            AppError::NotFound => (StatusCode::NOT_FOUND, "Resource not found".to_owned()),
+            AppError::Duplicate => (StatusCode::CONFLICT, "Resource already exists".to_owned()),
             AppError::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_owned(),
             ),
         };
 
-        (status, Json(ErrorResponse {
-            error: message,
-        }))
-            .into_response()
+        (status, Json(ErrorResponse { error: message })).into_response()
     }
 }
 

@@ -1,11 +1,11 @@
 pub mod login;
-pub mod register;
 pub mod me;
+pub mod register;
 use axum::{
+    Router,
     http::HeaderMap,
     response::{IntoResponse, Json},
-    routing::{post,get},
-    Router,
+    routing::{get, post},
 };
 
 use crate::state::AppState;
