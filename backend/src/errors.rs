@@ -12,6 +12,8 @@ pub enum AppError {
     NotFound,
     Duplicate,
     Internal,
+    FORBIDDEN,
+    Conflict
 }
 
 pub struct AppErrorWithMessage {
@@ -40,6 +42,8 @@ fn status_code(error: &AppError) -> StatusCode {
         AppError::NotFound => StatusCode::NOT_FOUND,
         AppError::Duplicate => StatusCode::CONFLICT,
         AppError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        AppError::FORBIDDEN => StatusCode::FORBIDDEN,
+        AppError::Conflict => StatusCode::CONFLICT,
     }
 }
 
@@ -54,6 +58,8 @@ impl IntoResponse for AppError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_owned(),
             ),
+            AppError::FORBIDDEN => (StatusCode::FORBIDDEN, "Forbidden".to_owned()),
+            AppError::Conflict => (StatusCode::CONFLICT, "Conflict".to_owned()),
         };
 
         (status, Json(ErrorResponse { error: message })).into_response()
