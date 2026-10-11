@@ -19,7 +19,7 @@ fn config() -> Config {
     Config::from_env()
 }
 
-pub fn create_token(userId: Uuid, token_type: TokenType) -> String {
+pub fn create_token(user_id: Uuid, token_type: TokenType) -> String {
     const ACCESS_TOKEN_LIFETIME: u64 = 15 * 60;
     const REFRESH_TOKEN_LIFETIME: u64 = 7 * 24 * 60 * 60;
 
@@ -34,7 +34,7 @@ pub fn create_token(userId: Uuid, token_type: TokenType) -> String {
     };
 
     let payload = Payload {
-        sub: userId,
+        sub: user_id,
         iat: issued_at as usize,
         exp: (issued_at + lifetime) as usize,
     };

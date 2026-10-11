@@ -1,4 +1,4 @@
-use axum::{Json, Router, routing::get};
+use axum::{Router, routing::get};
 pub mod config;
 #[path = "lib/mod.rs"]
 mod storage;
