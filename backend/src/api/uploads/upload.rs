@@ -49,6 +49,8 @@ pub(crate) struct Response {
     upload_url: String,
     expires_at: String,
     chunk_size_bytes: u64,
+    original_filename:String,
+    sanitized_filename:String,
     #[cfg(debug_assertions)]
     debug: DebugResponse,
 }
@@ -163,7 +165,6 @@ pub async fn upload(
 ) -> Result<(StatusCode, Json<Response>), AppErrorWithMessage> {
     let user = authenticate(&state, &headers).await?;
 
-    // ---- Input validation (before touching DB / storage) ----
     validate_file(&req.filename, &req.mime)?;
 
     if req.file_size == 0 || req.file_size > MAX_FILE_SIZE_BYTES {
@@ -234,7 +235,7 @@ pub async fn upload(
         }
     };
 
-    // ---- Replay checks: same key must mean same request ----
+    // Replay checks
     if record.original_filename != req.filename
         || record.content_type != req.mime
         || record.expected_size_bytes != expected_size
@@ -253,7 +254,6 @@ pub async fn upload(
         record = extend_expiry(&state.db, record.id).await?;
     }
 
-    // ---- Always derive SAS from the STORED row, never from freshly generated ids ----
     let (upload_url, blob_name) = generate_upload_sas_url(
         &user.id.to_string(),
         &record.id.to_string(),
@@ -282,6 +282,8 @@ pub async fn upload(
             upload_url: upload_url.to_string(),
             expires_at: record.expires_at.clone(),
             chunk_size_bytes: req.file_size,
+            original_filename: record.original_filename.clone(),
+            sanitized_filename: sanitize_filename(&record.original_filename),
             #[cfg(debug_assertions)]
             debug: DebugResponse {
                 user_id: user.id,
