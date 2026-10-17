@@ -13,7 +13,7 @@ pub enum AppError {
     Duplicate,
     Internal,
     FORBIDDEN,
-    Conflict
+    Conflict,
 }
 
 pub struct AppErrorWithMessage {

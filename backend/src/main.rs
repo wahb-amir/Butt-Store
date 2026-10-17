@@ -9,8 +9,8 @@ pub mod errors;
 pub mod state;
 pub mod types;
 pub mod utils;
-use state::AppState;
 use futures_util::StreamExt;
+use state::AppState;
 
 async fn hello() -> String {
     "Hello World!".to_string()
@@ -37,28 +37,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test Azure connection by consuming the first item from the stream
     let azure_connected = match storage::azure::init_blob_service() {
-        Ok(service_client) => {
-            match service_client.list_containers(None) {
-                Ok(mut stream) => match stream.next().await {
-                    Some(Ok(_)) => {
-                        println!("Successfully connected and authenticated with Azure Blob Service!");
-                        true
-                    }
-                    Some(Err(error)) => {
-                    eprintln!("Failed to authenticate or communicate with Azure: {:#?}", error);
+        Ok(service_client) => match service_client.list_containers(None) {
+            Ok(mut stream) => match stream.next().await {
+                Some(Ok(_)) => {
+                    println!("Successfully connected and authenticated with Azure Blob Service!");
+                    true
+                }
+                Some(Err(error)) => {
+                    eprintln!(
+                        "Failed to authenticate or communicate with Azure: {:#?}",
+                        error
+                    );
                     false
                 }
-                    None => {
-                        println!("Successfully connected, but the storage account has zero containers.");
-                        true
-                    }
-                },
-                Err(error) => {
-                    eprintln!("Failed to request Azure containers: {error}");
-                    false
+                None => {
+                    println!(
+                        "Successfully connected, but the storage account has zero containers."
+                    );
+                    true
                 }
+            },
+            Err(error) => {
+                eprintln!("Failed to request Azure containers: {error}");
+                false
             }
-        }
+        },
         Err(error) => {
             eprintln!("Failed to initialize Azure client configuration: {error}");
             false
@@ -68,7 +71,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = match pool {
         Some(pool) if azure_connected => pool,
         _ => {
-            return Err("Backend startup aborted because a required service failed to initialize".into());
+            return Err(
+                "Backend startup aborted because a required service failed to initialize".into(),
+            );
         }
     };
 

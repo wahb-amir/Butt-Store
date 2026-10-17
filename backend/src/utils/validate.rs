@@ -29,9 +29,7 @@ pub fn sanitize_filename(filename: &str) -> String {
         return FALLBACK.to_owned();
     }
 
-    let mut sanitized = String::with_capacity(
-        basename.len().min(MAX_FILENAME_BYTES),
-    );
+    let mut sanitized = String::with_capacity(basename.len().min(MAX_FILENAME_BYTES));
 
     let mut previous_was_underscore = false;
 
@@ -70,12 +68,10 @@ pub fn sanitize_filename(filename: &str) -> String {
         .unwrap_or("")
         .to_ascii_uppercase();
 
-    let is_reserved = matches!(
-        stem.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL"
-    ) || (stem.len() == 4
-        && (stem.starts_with("COM") || stem.starts_with("LPT"))
-        && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+    let is_reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
 
     let mut sanitized = sanitized;
 
@@ -85,9 +81,7 @@ pub fn sanitize_filename(filename: &str) -> String {
 
     // Limit the filename to 255 UTF-8 bytes without cutting
     // through a multibyte Unicode character.
-    let mut bounded = String::with_capacity(
-        sanitized.len().min(MAX_FILENAME_BYTES),
-    );
+    let mut bounded = String::with_capacity(sanitized.len().min(MAX_FILENAME_BYTES));
 
     for c in sanitized.chars() {
         if bounded.len() + c.len_utf8() > MAX_FILENAME_BYTES {
@@ -105,7 +99,6 @@ pub fn sanitize_filename(filename: &str) -> String {
         bounded.to_owned()
     }
 }
-
 
 pub fn validate_file(filename: &str, mime: &str) -> Result<(), AppErrorWithMessage> {
     if filename.trim().is_empty() {
