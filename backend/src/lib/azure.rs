@@ -47,14 +47,20 @@ pub async fn generate_upload_sas_url(
     upload_session_id: &str,
     blob_name: &str,
 ) -> StorageResult<(Url, String)> {
+    let blob_path = format!("{}/{}/{}", user_id, upload_session_id, blob_name);
+    let (url, _) = generate_upload_sas_url_for_blob(&blob_path).await?;
+    Ok((url, blob_path))
+}
+
+pub async fn generate_upload_sas_url_for_blob(
+    blob_path: &str,
+) -> StorageResult<(Url, OffsetDateTime)> {
     let config = Config::from_env();
     let service_client = init_blob_service()?;
 
     // 2. Construct the exact hierarchical file path requested
-    let blob_path = format!("{}/{}/{}", user_id, upload_session_id, blob_name);
-
     let starts_on = OffsetDateTime::now_utc();
-    let expires_on = starts_on + Duration::minutes(20);
+    let expires_on = starts_on + Duration::minutes(15);
 
     // 4. Request a short-lived User Delegation Key from Azure via Entra ID
     let key_info = azure_storage_blob::models::KeyInfo {
@@ -74,8 +80,9 @@ pub async fn generate_upload_sas_url(
         &user_delegation_key,
         expires_on,
     )?
-    .blob(&config.azure_storage_container_name, &blob_path)
-    .write() // Grants permission to stage blocks and commit block lists
+    .blob(&config.azure_storage_container_name, blob_path)
+    .create()
+    .write()
     .build();
 
     // 6. Assemble the final URL with the SAS token query attached
@@ -89,5 +96,5 @@ pub async fn generate_upload_sas_url(
     sas_url.set_query(Some(&sas_token));
 
     // Returns both the ready-to-use SAS URL and the blob path (useful to track in your database)
-    Ok((sas_url, blob_path))
+    Ok((sas_url, expires_on))
 }
