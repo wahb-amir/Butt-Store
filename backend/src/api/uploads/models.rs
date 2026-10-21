@@ -19,5 +19,8 @@ pub(crate) struct UploadRecord {
     pub(crate) content_type: String,
     pub(crate) status: String,
     pub(crate) expected_size_bytes: i64,
+    pub(crate) actual_size_bytes: Option<i64>,
+    pub(crate) etag: Option<String>,
+    pub(crate) checksum_sha256: Option<Vec<u8>>,
     pub(crate) expires_at: OffsetDateTime,
 }
