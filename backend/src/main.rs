@@ -1,16 +1,6 @@
 use axum::{Router, routing::get};
-pub mod config;
-#[path = "lib/mod.rs"]
-mod storage;
-use config::Config;
-mod api;
-pub mod db;
-pub mod errors;
-pub mod state;
-pub mod types;
-pub mod utils;
+use backend::{config::Config, db::create_pool, state::AppState};
 use futures_util::StreamExt;
-use state::AppState;
 
 async fn hello() -> String {
     "Hello World!".to_string()
@@ -24,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config: Config = Config::from_env();
     let database_url = config.database_url;
 
-    let pool = match db::create_pool(&database_url).await {
+    let pool = match create_pool(&database_url).await {
         Ok(pool) => {
             println!("Successfully connected to the database");
             Some(pool)
@@ -36,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Test Azure connection by consuming the first item from the stream
-    let azure_connected = match storage::azure::init_blob_service() {
+    let azure_connected = match backend::storage::azure::init_blob_service() {
         Ok(service_client) => match service_client.list_containers(None) {
             Ok(mut stream) => match stream.next().await {
                 Some(Ok(_)) => {
@@ -80,8 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Put it into shared application state
     let state = AppState { db: pool };
     let app: Router = Router::new()
-        .nest("/auth", api::auth::router())
-        .merge(api::uploads::router())
+        .nest("/auth", backend::api::auth::router())
+        .merge(backend::api::uploads::router())
         .route("/", get(hello))
         .with_state(state);
 

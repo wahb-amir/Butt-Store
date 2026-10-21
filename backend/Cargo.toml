@@ -3,6 +3,18 @@ name = "backend"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "verify_worker"
+path = "src/bin/verify_worker.rs"
+
+[[bin]]
+name = "process_worker"
+path = "src/bin/process_worker.rs"
+
+[[bin]]
+name = "reconcile_worker"
+path = "src/bin/reconcile_worker.rs"
+
 [dependencies]
 axum = "0.8.9"
 cookie = "0.18"
@@ -25,4 +37,11 @@ azure_storage_sas = "1.0.0"
 url = "2.5.8"
 time = "0.3.55"
 base64 = "0.23.1"
+sha2 = "0.10"
+clap = { version = "4.5", features = ["derive"] }
+tokio-stream = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1.0"
+anyhow = "1.0"
 
