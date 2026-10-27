@@ -12,51 +12,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
     let config: Config = Config::from_env();
-    let database_url = config.database_url;
+    let database_url: String = config.database_url;
 
-    let pool = match create_pool(&database_url).await {
-        Ok(pool) => {
-            println!("Successfully connected to the database");
-            Some(pool)
-        }
-        Err(error) => {
-            eprintln!("Failed to connect to the database: {error}");
-            None
+    let db_task = async {
+        match create_pool(&database_url).await {
+            Ok(pool) => {
+                println!("Successfully connected to the database");
+                Some(pool)
+            }
+            Err(error) => {
+                eprintln!("Failed to connect to the database: {error}");
+                None
+            }
         }
     };
 
     // Test Azure connection by consuming the first item from the stream
-    let azure_connected = match backend::storage::azure::init_blob_service() {
-        Ok(service_client) => match service_client.list_containers(None) {
-            Ok(mut stream) => match stream.next().await {
-                Some(Ok(_)) => {
-                    println!("Successfully connected and authenticated with Azure Blob Service!");
-                    true
-                }
-                Some(Err(error)) => {
-                    eprintln!(
-                        "Failed to authenticate or communicate with Azure: {:#?}",
-                        error
-                    );
+    let azure_task = async {
+        match backend::storage::azure::init_blob_service() {
+            Ok(service_client) => match service_client.list_containers(None) {
+                Ok(mut stream) => match stream.next().await {
+                    Some(Ok(_)) => {
+                        println!("Successfully connected and authenticated with Azure Blob Service!");
+                        true
+                    }
+                    Some(Err(error)) => {
+                        eprintln!(
+                            "Failed to authenticate or communicate with Azure: {:#?}",
+                            error
+                        );
+                        false
+                    }
+                    None => {
+                        println!(
+                            "Successfully connected, but the storage account has zero containers."
+                        );
+                        true
+                    }
+                },
+                Err(error) => {
+                    eprintln!("Failed to request Azure containers: {error}");
                     false
-                }
-                None => {
-                    println!(
-                        "Successfully connected, but the storage account has zero containers."
-                    );
-                    true
                 }
             },
             Err(error) => {
-                eprintln!("Failed to request Azure containers: {error}");
+                eprintln!("Failed to initialize Azure client configuration: {error}");
                 false
             }
-        },
-        Err(error) => {
-            eprintln!("Failed to initialize Azure client configuration: {error}");
-            false
         }
     };
+
+    let (pool, azure_connected) = tokio::join!(db_task, azure_task);
 
     let pool = match pool {
         Some(pool) if azure_connected => pool,
