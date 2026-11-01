@@ -3,7 +3,7 @@
 CREATE TABLE background_jobs (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     file_id       UUID NOT NULL REFERENCES uploads(id),
-    job_type      TEXT NOT NULL CHECK (job_type IN ('complete_upload', 'verify_apk', 'prepare_distribution')),
+    job_type      TEXT NOT NULL CHECK (job_type IN ('verify_apk', 'prepare_distribution')),
     status        TEXT NOT NULL DEFAULT 'pending'
                   CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
     attempts      INTEGER NOT NULL DEFAULT 0,

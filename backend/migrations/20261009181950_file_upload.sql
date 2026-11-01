@@ -1,5 +1,8 @@
-CREATE TYPE upload_status AS ENUM ('PENDING', 'COMPLETED', 'FAILED',
-        'EXPIRED', 'CANCELLED', 'QUARANTINED', 'DELETED');
+CREATE TYPE upload_status AS ENUM (
+    'PENDING', 'COMPLETED', 'FAILED',
+    'EXPIRED', 'CANCELLED', 'QUARANTINED', 'DELETED',
+    'PENDING_VERIFICATION', 'VERIFIED', 'READY_FOR_DISTRIBUTION'
+);
 CREATE TABLE uploads (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
@@ -53,11 +56,17 @@ CREATE TABLE uploads (
 
     -- State / timestamp consistency
     CONSTRAINT uploads_completed_consistency_chk
-        CHECK (status <> 'COMPLETED'
+        CHECK (status <> 'VERIFIED'
                OR (completed_at IS NOT NULL AND actual_size_bytes IS NOT NULL)),
     CONSTRAINT uploads_deleted_consistency_chk
-        CHECK (status <> 'DELETED' OR deleted_at IS NOT NULL)
-);
+        CHECK (status <> 'DELETED' OR deleted_at IS NOT NULL),
+    CONSTRAINT uploads_ready_distribution_consistency_chk
+        CHECK (status <> 'READY_FOR_DISTRIBUTION' OR (completed_at IS NOT NULL AND actual_size_bytes IS NOT NULL)),
+
+    -- Add consistency check for PENDING_VERIFICATION status
+    CONSTRAINT uploads_pending_verification_consistency_chk
+        CHECK (status <> 'PENDING_VERIFICATION' OR (completed_at IS NOT NULL AND actual_size_bytes IS NOT NULL))
+    );
 
 -- "My uploads" listings, filtered by status, newest first
 CREATE INDEX uploads_user_status_created_idx
