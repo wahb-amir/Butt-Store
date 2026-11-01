@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::{Result};
 use crate::{
     state::AppState,
-    types::jobs::{BackgroundJob, JobStatus, JobType},
+    types::jobs::{BackgroundJob, JobType},
 };
 use sqlx::{query, query_as};
 use time::OffsetDateTime;
@@ -9,8 +9,6 @@ use uuid::Uuid;
 
 const WORKER_LEASE_SECONDS: i64 = 300; // 5 minutes
 
-/// Claim a pending job atomically using FOR UPDATE SKIP LOCKED.
-/// Returns the claimed job with its lock extended.
 pub async fn claim_job(
     state: &AppState,
     _worker_id: &str,
@@ -50,6 +48,36 @@ pub async fn claim_job(
     })?;
 
     Ok(job)
+}
+
+pub async fn claim_job_type(
+    state: &AppState,
+    job_type: JobType,
+    _worker_id: &str,
+) -> Result<Option<BackgroundJob>> {
+    let now = OffsetDateTime::now_utc();
+    let lease_until = now + time::Duration::seconds(WORKER_LEASE_SECONDS);
+
+    query_as::<_, BackgroundJob>(
+        r#"
+        UPDATE background_jobs
+        SET status = 'processing', locked_until = $2, attempts = attempts + 1
+        WHERE id = (
+            SELECT id FROM background_jobs
+            WHERE status = 'pending' AND available_at <= $1 AND job_type = $3
+            ORDER BY available_at, created_at
+            FOR UPDATE SKIP LOCKED LIMIT 1
+        )
+        RETURNING id, file_id, job_type, status, attempts,
+                  available_at, locked_until, last_error, created_at, completed_at
+        "#,
+    )
+    .bind(now)
+    .bind(lease_until)
+    .bind(job_type.as_str())
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| anyhow::anyhow!("Unable to claim {} job: {e}", job_type.as_str()))
 }
 
 /// Claim a specific job by ID (for testing or targeted processing).
