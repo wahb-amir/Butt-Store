@@ -150,7 +150,7 @@ async fn expire_upload_if_due(db: &PgPool, upload_id: Uuid) -> Result<(), AppErr
         UPDATE uploads
         SET
             status = 'EXPIRED',
-            status_reason = 'Upload session deadline exceeded'
+            failure_reason = 'Upload session deadline exceeded'
         WHERE id = $1
           AND status IN ('PENDING', 'UPLOADING')
           AND expires_at <= now()
@@ -214,7 +214,7 @@ async fn issue_sas_for_session(
 }
 
 // Create or fetch an upload session
-pub async fn upload(
+pub(crate) async fn upload(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<Request>,

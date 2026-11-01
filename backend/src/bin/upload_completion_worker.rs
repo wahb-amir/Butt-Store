@@ -98,7 +98,9 @@ async fn run_worker(state: Arc<AppState>, args: Args) -> Result<()> {
 async fn process_completion_job(state: &AppState, job: &BackgroundJob) -> Result<()> {
     let upload = get_upload_record(&state.db, job.file_id).await?;
     if upload.status != "PROCESSING_PENDING" {
-        fail_job(state, job.id, "Upload is not in PROCESSING_PENDING state", false).await?;
+        let reason = "Upload is not in PROCESSING_PENDING state";
+        fail_job(state, job.id, reason, false).await?;
+        update_upload_failure(&state.db, job.file_id, reason).await?;
         return Ok(());
     }
 
@@ -113,7 +115,9 @@ async fn process_completion_job(state: &AppState, job: &BackgroundJob) -> Result
     )
     .await?;
     if actual_size != expected_size {
-        fail_job(state, job.id, "Committed blob size does not match expected size", false).await?;
+        let reason = "Committed blob size does not match expected size";
+        fail_job(state, job.id, reason, false).await?;
+        update_upload_failure(&state.db, job.file_id, reason).await?;
         return Ok(());
     }
 
@@ -134,6 +138,23 @@ async fn process_completion_job(state: &AppState, job: &BackgroundJob) -> Result
     tx.commit().await?;
     complete_job(state, job.id).await?;
     info!(job_id = %job.id, file_id = %job.file_id, etag = %etag, "Upload committed and queued for processing");
+    Ok(())
+}
+
+async fn update_upload_failure(
+    db: &PgPool,
+    file_id: uuid::Uuid,
+    reason: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE uploads
+         SET status = 'FAILED', failure_reason = $1, updated_at = now()
+         WHERE id = $2",
+    )
+    .bind(reason)
+    .bind(file_id)
+    .execute(db)
+    .await?;
     Ok(())
 }
 

@@ -142,6 +142,7 @@ async fn process_preparation_job(
     if upload.status != "VERIFIED" {
         let err = format!("Upload is not in VERIFIED state (current: {})", upload.status);
         fail_job(state, job.id, &err, false).await?;
+        update_upload_failure(&state.db, file_id, &err).await?;
         return Ok(());
     }
 
@@ -158,7 +159,7 @@ async fn process_preparation_job(
     info!(job_id = %job.id, "Distribution preparation completed (stub)");
 
     // Update upload status to READY_FOR_DISTRIBUTION
-    update_upload_status(&state.db, file_id, "READY_FOR_DISTRIBUTION", None).await?;
+    update_upload_status(&state.db, file_id, "READY_FOR_DISTRIBUTION").await?;
 
     complete_job(state, job.id).await?;
     info!(job_id = %job.id, file_id = %file_id, "Distribution preparation completed successfully");
@@ -206,20 +207,35 @@ async fn update_upload_status(
     db: &PgPool,
     file_id: uuid::Uuid,
     status: &str,
-    reason: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
         r#"
         UPDATE uploads
-        SET status = $1, status_reason = $2, updated_at = now()
-        WHERE id = $3
+        SET status = $1, updated_at = now()
+        WHERE id = $2
         "#,
     )
     .bind(status)
-    .bind(reason)
     .bind(file_id)
     .execute(db)
     .await?;
 
+    Ok(())
+}
+
+async fn update_upload_failure(
+    db: &PgPool,
+    file_id: uuid::Uuid,
+    reason: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE uploads
+         SET status = 'FAILED', failure_reason = $1, updated_at = now()
+         WHERE id = $2",
+    )
+    .bind(reason)
+    .bind(file_id)
+    .execute(db)
+    .await?;
     Ok(())
 }

@@ -143,6 +143,15 @@ pub fn create_blob_client(blob_path: &str) -> StorageResult<azure_storage_blob::
     Ok(blob_client)
 }
 
+pub async fn delete_blob(blob_path: &str) -> StorageResult<()> {
+    let blob_client = create_blob_client(blob_path)?;
+    blob_client
+        .delete(None)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    Ok(())
+}
+
 
 const MAX_BLOCKS_PER_BLOB: u64 = 50_000;
 

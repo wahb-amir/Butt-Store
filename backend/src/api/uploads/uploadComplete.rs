@@ -21,6 +21,8 @@ use super::{
 pub(crate) struct CompleteRequest {
     #[serde(rename = "idempotencyKey")]
     idempotency_key: Option<Uuid>,
+    #[serde(rename = "checksumSha256")]
+    checksum_sha256: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,6 +39,7 @@ pub(crate) async fn complete_upload(
     Json(request): Json<CompleteRequest>,
 ) -> Result<(StatusCode, Json<CompleteResponse>), AppErrorWithMessage> {
     let user = authenticate(&state, &headers).await?;
+    let checksum_sha256 = parse_sha256_hex(&request.checksum_sha256)?;
     let mut upload = find_upload_by_id(&state.db, user.id, upload_id)
         .await?
         .ok_or_else(|| AppError::NotFound.with_message("Upload not found"))?;
@@ -71,7 +74,7 @@ pub(crate) async fn complete_upload(
     }
     validate_upload_session(&upload)?;
 
-    let job_id = enqueue_completion_job(&state.db, upload_id).await?;
+    let job_id = enqueue_completion_job(&state.db, upload_id, checksum_sha256).await?;
     upload.status = "PROCESSING_PENDING".to_string();
     Ok((
         StatusCode::OK,
@@ -100,14 +103,20 @@ async fn find_completion_job(
     .map_err(db_err)
 }
 
-async fn enqueue_completion_job(db: &PgPool, upload_id: Uuid) -> Result<Uuid, AppErrorWithMessage> {
+async fn enqueue_completion_job(
+    db: &PgPool,
+    upload_id: Uuid,
+    checksum_sha256: Vec<u8>,
+) -> Result<Uuid, AppErrorWithMessage> {
     let mut tx: Transaction<'_, Postgres> = db.begin().await.map_err(db_err)?;
     let job_id = Uuid::new_v4();
     let updated = query(
-        "UPDATE uploads SET status = 'PROCESSING_PENDING', completion_requested_at = now()
+        "UPDATE uploads SET status = 'PROCESSING_PENDING', checksum_sha256 = $2,
+            completion_requested_at = now()
          WHERE id = $1 AND status = 'PENDING'",
     )
     .bind(upload_id)
+        .bind(checksum_sha256)
     .execute(&mut *tx)
     .await
     .map_err(db_err)?;
@@ -125,6 +134,25 @@ async fn enqueue_completion_job(db: &PgPool, upload_id: Uuid) -> Result<Uuid, Ap
     .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
     Ok(job_id)
+}
+
+fn parse_sha256_hex(value: &str) -> Result<Vec<u8>, AppErrorWithMessage> {
+    if value.len() != 64 {
+        return Err(AppError::BadRequest.with_message(
+            "checksumSha256 must be a 64-character hexadecimal SHA-256 hash",
+        ));
+    }
+
+    (0..value.len())
+        .step_by(2)
+        .map(|index| {
+            u8::from_str_radix(&value[index..index + 2], 16).map_err(|_| {
+                AppError::BadRequest.with_message(
+                    "checksumSha256 must be a 64-character hexadecimal SHA-256 hash",
+                )
+            })
+        })
+        .collect()
 }
 
 async fn find_upload_by_id(

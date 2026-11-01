@@ -3,11 +3,12 @@ use backend::{
     config::Config,
     db::create_pool,
     state::AppState,
-    storage::azure::{init_blob_service, list_blobs},
+    storage::azure::{delete_blob, init_blob_service, list_blobs},
     storage::jobs::create_job,
     types::jobs::JobType,
 };
 use clap::Parser;
+use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::{signal, time::{sleep, timeout}};
@@ -264,8 +265,19 @@ async fn reconcile_blob(
 
                     Ok(ReconcileAction::NoAction)
                 }
+                "FAILED" => {
+                    delete_blob(blob_name).await?;
+                    mark_upload_deleted(
+                        &state.db,
+                        upload.id,
+                        "Deleted failed upload during reconciliation",
+                    )
+                    .await?;
+                    info!(blob = %blob_name, upload_id = %upload.id, "Deleted failed upload blob during reconciliation");
+                    Ok(ReconcileAction::NoAction)
+                }
                 _ => {
-                    // Other states (EXPIRED, CANCELLED, FAILED, DELETED) - no action needed
+                    // Other states (EXPIRED, CANCELLED, DELETED) - no action needed
                     Ok(ReconcileAction::NoAction)
                 }
             }
@@ -332,6 +344,23 @@ async fn reconcile_blob(
             Ok(ReconcileAction::CreatedUpload)
         }
     }
+}
+
+async fn mark_upload_deleted(
+    db: &PgPool,
+    upload_id: uuid::Uuid,
+    reason: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE uploads
+         SET status = 'DELETED', deletion_reason = $1, deleted_at = now(), updated_at = now()
+         WHERE id = $2",
+    )
+    .bind(reason)
+    .bind(upload_id)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 #[derive(sqlx::FromRow)]

@@ -3,7 +3,7 @@ use backend::{
     config::Config,
     db::create_pool,
     state::AppState,
-    storage::azure::{create_blob_client, init_blob_service},
+    storage::azure::{create_blob_client, delete_blob, init_blob_service},
     storage::jobs::{claim_job_type, complete_job, fail_job, create_job_tx},
     types::jobs::{BackgroundJob, JobType},
 };
@@ -156,31 +156,44 @@ async fn process_verification_job(
     }
 
     let blob_name = &upload.blob_name;
-    let expected_checksum = upload.checksum_sha256.as_deref();
     let etag = upload.etag.as_deref().ok_or_else(|| anyhow::anyhow!("Upload is missing its committed blob ETag"))?;
+    let expected_checksum = match upload.checksum_sha256.as_deref() {
+        Some(checksum) => checksum,
+        None => {
+            fail_integrity_check(
+                state,
+                job.id,
+                file_id,
+                blob_name,
+                "Upload is missing its SHA-256 checksum",
+            )
+            .await?;
+            return Ok(());
+        }
+    };
 
     // Step 1: Verify blob exists in Azure
     info!(job_id = %job.id, blob = %blob_name, "Verifying blob existence");
     if !verify_blob_exists(blob_name).await? {
         let err = "Blob does not exist in Azure storage";
         fail_job(state, job.id, err, false).await?;
-        update_upload_status(&state.db, file_id, "QUARANTINED", Some(err)).await?;
+        update_upload_failure(&state.db, file_id, "FAILED", err).await?;
         return Ok(());
     }
 
-    // Step 2: Verify checksum
-    info!(job_id = %job.id, "Verifying checksum");
-    if let Some(expected) = expected_checksum {
-        let actual = download_and_checksum(blob_name, etag).await?;
-        if actual != expected {
-            let err = "Checksum mismatch";
-            fail_job(state, job.id, err, false).await?;
-            update_upload_status(&state.db, file_id, "QUARANTINED", Some(err)).await?;
-            return Ok(());
-        }
-        info!(job_id = %job.id, "Checksum verified");
-    } else {
-        warn!(job_id = %job.id, "No expected checksum in database, skipping checksum verification");
+    // Step 2: Verify the client-provided SHA-256 checksum.
+    info!(job_id = %job.id, "Verifying SHA-256 checksum");
+    let actual_checksum = download_and_checksum(blob_name, etag).await?;
+    if actual_checksum != expected_checksum {
+        fail_integrity_check(
+            state,
+            job.id,
+            file_id,
+            blob_name,
+            "SHA-256 checksum mismatch",
+        )
+        .await?;
+        return Ok(());
     }
 
     // Step 3: Verify APK structure and signatures using aapt2
@@ -188,7 +201,7 @@ async fn process_verification_job(
     if let Err(e) = verify_apk_with_aapt2(blob_name, etag).await {
         let err = format!("APK verification failed: {}", e);
         fail_job(state, job.id, &err, false).await?;
-        update_upload_status(&state.db, file_id, "QUARANTINED", Some(&err)).await?;
+        update_upload_failure(&state.db, file_id, "QUARANTINED", &err).await?;
         return Ok(());
     }
     info!(job_id = %job.id, "APK structure and signatures verified");
@@ -201,13 +214,13 @@ async fn process_verification_job(
         let is_malware = err.to_lowercase().contains("malware") || err.to_lowercase().contains("virus");
         fail_job(state, job.id, &err, !is_malware).await?;
         let status = if is_malware { "QUARANTINED" } else { "FAILED" };
-        update_upload_status(&state.db, file_id, status, Some(&err)).await?;
+        update_upload_failure(&state.db, file_id, status, &err).await?;
         return Ok(());
     }
     info!(job_id = %job.id, "Malware scan clean");
 
     let mut tx = state.db.begin().await?;
-    update_upload_status_tx(&mut tx, file_id, "VERIFIED", None).await?;
+    update_upload_status_tx(&mut tx, file_id, "VERIFIED").await?;
     create_job_tx(&mut tx, file_id, JobType::PrepareDistribution).await?;
     tx.commit().await?;
 
@@ -269,6 +282,31 @@ async fn verify_blob_exists(blob_name: &str) -> Result<bool> {
     }
 }
 
+async fn fail_integrity_check(
+    state: &AppState,
+    job_id: uuid::Uuid,
+    file_id: uuid::Uuid,
+    blob_name: &str,
+    reason: &str,
+) -> Result<()> {
+    fail_job(state, job_id, reason, false).await?;
+    sqlx::query(
+        "UPDATE uploads
+         SET status = 'FAILED', failure_reason = $1,
+             deletion_reason = $2, updated_at = now()
+         WHERE id = $3",
+    )
+    .bind(reason)
+    .bind(format!("Deleted after integrity failure: {reason}"))
+    .bind(file_id)
+    .execute(&state.db)
+    .await?;
+    if let Err(error) = delete_blob(blob_name).await {
+        error!(job_id = %job_id, blob = %blob_name, error = %error, "Failed to delete blob after integrity failure");
+    }
+    Ok(())
+}
+
 async fn download_and_checksum(blob_name: &str, etag: &str) -> Result<Vec<u8>> {
     use futures_util::StreamExt;
     use sha2::{Digest, Sha256};
@@ -285,10 +323,8 @@ async fn download_and_checksum(blob_name: &str, etag: &str) -> Result<Vec<u8>> {
 
     let mut hasher = Sha256::new();
     let mut stream = download_result.body;
-
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| anyhow::anyhow!(e))?;
-        hasher.update(&chunk);
+        hasher.update(chunk.map_err(|e| anyhow::anyhow!(e))?);
     }
 
     Ok(hasher.finalize().to_vec())
@@ -410,16 +446,16 @@ async fn scan_with_clamav(blob_name: &str, etag: &str) -> Result<()> {
     result
 }
 
-async fn update_upload_status(
+async fn update_upload_failure(
     db: &PgPool,
     file_id: uuid::Uuid,
     status: &str,
-    reason: Option<&str>,
+    reason: &str,
 ) -> Result<()> {
     sqlx::query(
         r#"
         UPDATE uploads
-        SET status = $1, status_reason = $2, updated_at = now()
+        SET status = $1, failure_reason = $2, updated_at = now()
         WHERE id = $3
         "#,
     )
@@ -436,17 +472,15 @@ async fn update_upload_status_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     file_id: uuid::Uuid,
     status: &str,
-    reason: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
         r#"
         UPDATE uploads
-        SET status = $1, status_reason = $2, updated_at = now()
-        WHERE id = $3
+        SET status = $1, updated_at = now()
+        WHERE id = $2
         "#,
     )
     .bind(status)
-    .bind(reason)
     .bind(file_id)
     .execute(&mut **tx)
     .await?;
