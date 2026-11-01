@@ -15,6 +15,10 @@ path = "src/bin/process_worker.rs"
 name = "reconcile_worker"
 path = "src/bin/reconcile_worker.rs"
 
+[[bin]]
+name = "upload_completion_worker"
+path = "src/bin/upload_completion_worker.rs"
+
 [dependencies]
 axum = "0.8.9"
 cookie = "0.18"
@@ -44,4 +48,3 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1.0"
 anyhow = "1.0"
-
