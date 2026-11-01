@@ -1,17 +1,19 @@
-use anyhow::{Context, Result};
+use anyhow::{Result};
 use crate::config::Config;
 use azure_core::credentials::Secret;
 use azure_identity::ClientSecretCredential;
 use azure_storage_blob::BlobServiceClient;
 use azure_storage_sas::SasBuilder;
-use azure_core::http::{NoFormat, RequestContent, XmlFormat};
+use azure_core::http::{ RequestContent, XmlFormat};
 use azure_storage_blob::clients::BlockBlobClient;
-use azure_storage_blob::models::BlockLookupList;
+use azure_storage_blob::models::{
+    BlobClientGetPropertiesResultHeaders, BlockListType, BlockLookupList,
+};
 use std::sync::{Arc, OnceLock};
 use time::{Duration, OffsetDateTime};
 use url::Url;
 use std::io::{Error as IoError, ErrorKind};
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::{TryStreamExt};
 
 pub type StorageResult<T> = Result<T>;
 
@@ -213,6 +215,52 @@ pub async fn commit_upload(
         .map_err(|e: azure_core::Error| anyhow::anyhow!(e))?;
 
     Ok(())
+}
+
+pub async fn validate_and_commit_upload(
+    blob: &BlockBlobClient,
+    blob_client: &azure_storage_blob::clients::BlobClient,
+    file_size: u64,
+    chunk_size: u64,
+) -> Result<(u64, String)> {
+    let expected = expected_blocks(file_size, chunk_size)?;
+    let expected_ids: Vec<Vec<u8>> = expected
+        .iter()
+        .map(|(index, _)| format!("block-{index:08}").into_bytes())
+        .collect();
+
+    let block_list = blob
+        .get_block_list(BlockListType::Uncommitted, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list committed blocks: {e}"))?
+        .into_model()
+        .map_err(|e| anyhow::anyhow!("Failed to decode committed blocks: {e}"))?;
+    let staged = block_list.uncommitted_blocks.unwrap_or_default();
+    if staged.len() != expected.len()
+        || staged.iter().zip(&expected_ids).any(|(block, id)| block.name.as_ref() != Some(id))
+        || staged
+            .iter()
+            .zip(expected.iter())
+            .any(|(block, (_, size))| block.size != Some(i64::try_from(*size).unwrap_or(-1)))
+    {
+        return Err(anyhow::anyhow!("Committed block list does not match expected upload"));
+    }
+
+    commit_upload(blob, file_size, chunk_size).await?;
+    let properties = blob_client
+        .get_properties(None)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to retrieve committed blob properties: {e}"))?;
+    let actual_size = properties
+        .content_length()
+        .map_err(|e| anyhow::anyhow!("Failed to read blob content length: {e}"))?
+        .ok_or_else(|| anyhow::anyhow!("Committed blob has no content length"))?;
+    let etag = properties
+        .etag()
+        .map_err(|e| anyhow::anyhow!("Failed to read blob ETag: {e}"))?
+        .ok_or_else(|| anyhow::anyhow!("Committed blob has no ETag"))?
+        .to_string();
+    Ok((actual_size, etag))
 }
 
 /// List all blobs in a container.
