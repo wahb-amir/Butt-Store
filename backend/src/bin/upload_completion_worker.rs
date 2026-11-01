@@ -21,6 +21,7 @@ use tracing_subscriber::EnvFilter;
 const COMPLETION_ATTEMPTS: u32 = 3;
 const COMPLETION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 const COMPLETION_RETRY_BACKOFF: Duration = Duration::from_secs(2);
+const COMPLETION_JOB_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Parser, Debug)]
 #[command(name = "upload_completion_worker", about = "Commits and finalizes uploaded blobs")]
@@ -58,7 +59,17 @@ async fn run_worker(state: Arc<AppState>, args: Args) -> Result<()> {
                 match claim_job_type(&state, JobType::CompleteUpload, &args.worker_id).await {
                     Ok(Some(job)) => {
                         empty_polls = 0;
-                        if let Err(error) = process_completion_job(&state, &job).await {
+                        let result = tokio::time::timeout(
+                            COMPLETION_JOB_TIMEOUT,
+                            process_completion_job(&state, &job),
+                        )
+                        .await
+                        .map_err(|_| anyhow::anyhow!(
+                            "upload completion timed out after {} minutes",
+                            COMPLETION_JOB_TIMEOUT.as_secs() / 60
+                        ))
+                        .and_then(|result| result);
+                        if let Err(error) = result {
                             error!(job_id = %job.id, error = %error, "Upload completion job failed");
                             fail_job(&state, job.id, &error.to_string(), true).await?;
                         }

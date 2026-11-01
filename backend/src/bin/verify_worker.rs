@@ -1,19 +1,21 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use backend::{
     config::Config,
     db::create_pool,
     state::AppState,
     storage::azure::{create_blob_client, init_blob_service},
-    storage::jobs::{claim_job, complete_job, fail_job, create_job_tx},
+    storage::jobs::{claim_job_type, complete_job, fail_job, create_job_tx},
     types::jobs::{BackgroundJob, JobType},
 };
 use clap::Parser;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::signal;
+use tokio::{signal, time::timeout};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Parser, Debug)]
 #[command(name = "verify_worker", about = "APK verification worker")]
@@ -86,14 +88,26 @@ async fn run_worker(
                 shutdown = true;
             }
             _ = tokio::time::sleep(Duration::from_secs(args.poll_interval)) => {
-                match claim_job(&state, &args.worker_id).await {
+                match claim_job_type(&state, JobType::VerifyApk, &args.worker_id).await {
                     Ok(Some(job)) => {
                         empty_polls = 0;
                         info!(job_id = %job.id, file_id = %job.file_id, "Claimed verification job");
 
-                        if let Err(e) = process_verification_job(&state, &job, &args.worker_id).await {
+                        let result = match timeout(
+                            VERIFICATION_TIMEOUT,
+                            process_verification_job(&state, &job, &args.worker_id),
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(anyhow::anyhow!(
+                                "verification timed out after {} minutes",
+                                VERIFICATION_TIMEOUT.as_secs() / 60
+                            )),
+                        };
+                        if let Err(e) = result {
                             error!(job_id = %job.id, error = %e, "Verification job failed");
-                            // The error is already handled in process_verification_job
+                            fail_job(&state, job.id, &e.to_string(), true).await?;
                         }
                     }
                     Ok(None) => {
@@ -123,7 +137,7 @@ async fn run_worker(
 async fn process_verification_job(
     state: &AppState,
     job: &BackgroundJob,
-    worker_id: &str,
+    _worker_id: &str,
 ) -> Result<()> {
     let file_id = job.file_id;
 
@@ -192,8 +206,6 @@ async fn process_verification_job(
     }
     info!(job_id = %job.id, "Malware scan clean");
 
-    // All verifications passed!
-    // Update upload status to VERIFIED and enqueue prepare_distribution job
     let mut tx = state.db.begin().await?;
     update_upload_status_tx(&mut tx, file_id, "VERIFIED", None).await?;
     create_job_tx(&mut tx, file_id, JobType::PrepareDistribution).await?;

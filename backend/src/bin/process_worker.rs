@@ -1,18 +1,20 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use backend::{
     config::Config,
     db::create_pool,
     state::AppState,
-    storage::jobs::{claim_job, complete_job, fail_job},
-    types::jobs::BackgroundJob,
+    storage::jobs::{claim_job_type, complete_job, fail_job},
+    types::jobs::{BackgroundJob, JobType},
 };
 use clap::Parser;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::signal;
-use tracing::{error, info, warn};
+use tokio::{signal, time::timeout};
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
+
+const PREPARATION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Parser, Debug)]
 #[command(name = "process_worker", about = "Distribution preparation worker")]
@@ -81,20 +83,26 @@ async fn run_worker(
                 shutdown = true;
             }
             _ = tokio::time::sleep(Duration::from_secs(args.poll_interval)) => {
-                match claim_job(&state, &args.worker_id).await {
+                match claim_job_type(&state, JobType::PrepareDistribution, &args.worker_id).await {
                     Ok(Some(job)) => {
-                        // Only process prepare_distribution jobs
-                        if job.job_type != "prepare_distribution" {
-                            warn!(job_id = %job.id, job_type = %job.job_type, "Skipping non-prepare_distribution job");
-                            fail_job(&state, job.id, "Unexpected job type", false).await?;
-                            continue;
-                        }
-
                         empty_polls = 0;
                         info!(job_id = %job.id, file_id = %job.file_id, "Claimed distribution preparation job");
 
-                        if let Err(e) = process_preparation_job(&state, &job, &args.worker_id).await {
+                        let result = match timeout(
+                            PREPARATION_TIMEOUT,
+                            process_preparation_job(&state, &job, &args.worker_id),
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(anyhow::anyhow!(
+                                "distribution preparation timed out after {} minutes",
+                                PREPARATION_TIMEOUT.as_secs() / 60
+                            )),
+                        };
+                        if let Err(e) = result {
                             error!(job_id = %job.id, error = %e, "Preparation job failed");
+                            fail_job(&state, job.id, &e.to_string(), true).await?;
                         }
                     }
                     Ok(None) => {
@@ -123,7 +131,7 @@ async fn run_worker(
 async fn process_preparation_job(
     state: &AppState,
     job: &BackgroundJob,
-    worker_id: &str,
+    _worker_id: &str,
 ) -> Result<()> {
     let file_id = job.file_id;
 

@@ -7,7 +7,8 @@ use sqlx::{query, query_as};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-const WORKER_LEASE_SECONDS: i64 = 300; // 5 minutes
+const WORKER_LEASE_SECONDS: i64 = 1800; // 30 minutes
+const MAX_JOB_ATTEMPTS: i32 = 5;
 
 pub async fn claim_job(
     state: &AppState,
@@ -15,6 +16,7 @@ pub async fn claim_job(
 ) -> Result<Option<BackgroundJob>> {
     let now = OffsetDateTime::now_utc();
     let lease_until = now + time::Duration::seconds(WORKER_LEASE_SECONDS);
+    recover_expired_jobs(state, now).await?;
 
     let job = query_as::<_, BackgroundJob>(
         r#"
@@ -57,6 +59,7 @@ pub async fn claim_job_type(
 ) -> Result<Option<BackgroundJob>> {
     let now = OffsetDateTime::now_utc();
     let lease_until = now + time::Duration::seconds(WORKER_LEASE_SECONDS);
+    recover_expired_jobs(state, now).await?;
 
     query_as::<_, BackgroundJob>(
         r#"
@@ -78,6 +81,33 @@ pub async fn claim_job_type(
     .fetch_optional(&state.db)
     .await
     .map_err(|e| anyhow::anyhow!("Unable to claim {} job: {e}", job_type.as_str()))
+}
+
+async fn recover_expired_jobs(state: &AppState, now: OffsetDateTime) -> Result<()> {
+    query(
+        r#"
+        UPDATE background_jobs
+        SET
+            status = CASE WHEN attempts >= $2 THEN 'failed' ELSE 'pending' END,
+            locked_until = NULL,
+            last_error = COALESCE(last_error, 'Worker lease expired'),
+            available_at = CASE
+                WHEN attempts >= $2 THEN available_at
+                ELSE $1 + (interval '30 seconds' * LEAST(2 ^ attempts, 120))
+            END,
+            completed_at = CASE WHEN attempts >= $2 THEN $1 ELSE completed_at END
+        WHERE status = 'processing'
+          AND locked_until IS NOT NULL
+          AND locked_until <= $1
+        "#,
+    )
+    .bind(now)
+    .bind(MAX_JOB_ATTEMPTS)
+    .execute(&state.db)
+    .await
+    .map_err(|e| anyhow::anyhow!("Unable to recover expired jobs: {e}"))?;
+
+    Ok(())
 }
 
 /// Claim a specific job by ID (for testing or targeted processing).
@@ -157,21 +187,26 @@ pub async fn fail_job(
     let now = OffsetDateTime::now_utc();
 
     if retry {
-        // Requeue with exponential backoff: 2^attempts * 30 seconds, max 1 hour
+        // Requeue with exponential backoff, then permanently fail at the limit.
         query(
             r#"
             UPDATE background_jobs
             SET
-                status = 'pending',
+                status = CASE WHEN attempts >= $4 THEN 'failed' ELSE 'pending' END,
                 locked_until = NULL,
                 last_error = $1,
-                available_at = $2 + (interval '30 seconds' * (2 ^ attempts))
+                available_at = CASE
+                    WHEN attempts >= $4 THEN available_at
+                    ELSE $2 + (interval '30 seconds' * LEAST(2 ^ attempts, 120))
+                END,
+                completed_at = CASE WHEN attempts >= $4 THEN $2 ELSE completed_at END
             WHERE id = $3
             "#,
         )
         .bind(error)
         .bind(now)
         .bind(job_id)
+        .bind(MAX_JOB_ATTEMPTS)
         .execute(&state.db)
         .await
         .map_err(|e| {

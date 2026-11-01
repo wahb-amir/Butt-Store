@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use backend::{
     config::Config,
     db::create_pool,
@@ -8,12 +8,15 @@ use backend::{
     types::jobs::JobType,
 };
 use clap::Parser;
-use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::signal;
+use tokio::{signal, time::{sleep, timeout}};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+const RECONCILIATION_ATTEMPTS: u32 = 3;
+const RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const RECONCILIATION_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 
 #[derive(Parser, Debug)]
 #[command(name = "reconcile_worker", about = "Azure-PostgreSQL reconciliation worker")]
@@ -64,7 +67,7 @@ async fn main() -> Result<()> {
     info!("Starting reconciliation worker: {}", args.worker_id);
 
     if args.once {
-        run_reconciliation_once(&state, &*blob_service, &args.container, &args.worker_id).await?;
+        run_reconciliation_with_retry(&state, &*blob_service, &args.container, &args.worker_id).await?;
     } else {
         run_reconciliation_loop(state, blob_service, args).await?;
     }
@@ -93,7 +96,7 @@ async fn run_reconciliation_loop(
                 shutdown = true;
             }
             _ = tokio::time::sleep(Duration::from_secs(args.poll_interval)) => {
-                if let Err(e) = run_reconciliation_once(&state, &*blob_service, &args.container, &args.worker_id).await {
+                if let Err(e) = run_reconciliation_with_retry(&state, &*blob_service, &args.container, &args.worker_id).await {
                     error!(error = %e, "Reconciliation run failed");
                 }
             }
@@ -102,6 +105,41 @@ async fn run_reconciliation_loop(
 
     info!("Reconciliation worker stopped");
     Ok(())
+}
+
+async fn run_reconciliation_with_retry(
+    state: &AppState,
+    blob_service: &azure_storage_blob::BlobServiceClient,
+    container_name: &str,
+    worker_id: &str,
+) -> Result<()> {
+    let mut last_error = None;
+
+    for attempt in 1..=RECONCILIATION_ATTEMPTS {
+        match timeout(
+            RECONCILIATION_TIMEOUT,
+            run_reconciliation_once(state, blob_service, container_name, worker_id),
+        )
+        .await
+        {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(error)) => last_error = Some(error),
+            Err(_) => {
+                last_error = Some(anyhow::anyhow!(
+                    "reconciliation timed out after {} minutes",
+                    RECONCILIATION_TIMEOUT.as_secs() / 60
+                ));
+            }
+        }
+
+        if attempt < RECONCILIATION_ATTEMPTS {
+            let backoff = RECONCILIATION_RETRY_BACKOFF * attempt;
+            warn!(attempt, backoff_secs = backoff.as_secs(), "Retrying reconciliation run");
+            sleep(backoff).await;
+        }
+    }
+
+    Err(last_error.expect("reconciliation attempts always produce an error"))
 }
 
 async fn run_reconciliation_once(
@@ -119,7 +157,7 @@ async fn run_reconciliation_once(
     let mut stats = ReconciliationStats::default();
 
     for blob_name in blobs {
-        // Skip non-APK files (optional filtering)
+        // Skip non-APK files
         if !blob_name.ends_with(".apk") && !blob_name.ends_with(".aab") {
             continue;
         }
