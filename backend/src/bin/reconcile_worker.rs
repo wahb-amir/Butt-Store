@@ -211,8 +211,7 @@ async fn reconcile_blob(
     // Check if upload record exists for this blob
     let existing_upload = sqlx::query_as::<_, UploadRecord>(
         r#"
-        SELECT id, user_id, blob_name, original_filename, content_type,
-               status, expected_size_bytes, expires_at
+        SELECT id, status
         FROM uploads
         WHERE blob_name = $1
         "#,
@@ -366,14 +365,5 @@ async fn mark_upload_deleted(
 #[derive(sqlx::FromRow)]
 struct UploadRecord {
     id: uuid::Uuid,
-    user_id: uuid::Uuid,
-    blob_name: String,
-    original_filename: String,
-    content_type: String,
     status: String,
-    expected_size_bytes: i64,
-    actual_size_bytes: Option<i64>,
-    etag: Option<String>,
-    checksum_sha256: Option<Vec<u8>>,
-    expires_at: time::OffsetDateTime,
 }
