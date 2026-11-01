@@ -130,8 +130,20 @@ async fn process_verification_job(
     // Get upload record
     let upload = get_upload_record(&state.db, file_id).await?;
 
+    if upload.status != "PROCESSING_PENDING" {
+        fail_job(
+            state,
+            job.id,
+            "Upload is not in PROCESSING_PENDING state",
+            false,
+        )
+        .await?;
+        return Ok(());
+    }
+
     let blob_name = &upload.blob_name;
     let expected_checksum = upload.checksum_sha256.as_deref();
+    let etag = upload.etag.as_deref().ok_or_else(|| anyhow::anyhow!("Upload is missing its committed blob ETag"))?;
 
     // Step 1: Verify blob exists in Azure
     info!(job_id = %job.id, blob = %blob_name, "Verifying blob existence");
@@ -145,7 +157,7 @@ async fn process_verification_job(
     // Step 2: Verify checksum
     info!(job_id = %job.id, "Verifying checksum");
     if let Some(expected) = expected_checksum {
-        let actual = download_and_checksum(blob_name).await?;
+        let actual = download_and_checksum(blob_name, etag).await?;
         if actual != expected {
             let err = "Checksum mismatch";
             fail_job(state, job.id, err, false).await?;
@@ -159,7 +171,7 @@ async fn process_verification_job(
 
     // Step 3: Verify APK structure and signatures using aapt2
     info!(job_id = %job.id, "Verifying APK structure and signatures");
-    if let Err(e) = verify_apk_with_aapt2(blob_name).await {
+    if let Err(e) = verify_apk_with_aapt2(blob_name, etag).await {
         let err = format!("APK verification failed: {}", e);
         fail_job(state, job.id, &err, false).await?;
         update_upload_status(&state.db, file_id, "QUARANTINED", Some(&err)).await?;
@@ -169,7 +181,7 @@ async fn process_verification_job(
 
     // Step 4: Malware scan with ClamAV
     info!(job_id = %job.id, "Running malware scan");
-    if let Err(e) = scan_with_clamav(blob_name).await {
+    if let Err(e) = scan_with_clamav(blob_name, etag).await {
         let err = format!("Malware scan failed: {}", e);
         // Distinguish between malware detected (permanent failure) and scanner error (retry)
         let is_malware = err.to_lowercase().contains("malware") || err.to_lowercase().contains("virus");
@@ -201,7 +213,8 @@ async fn get_upload_record(
         r#"
         SELECT
             id, user_id, blob_name, original_filename, content_type,
-            status, expected_size_bytes, expires_at
+            status, expected_size_bytes, actual_size_bytes, etag,
+            checksum_sha256, expires_at
         FROM uploads
         WHERE id = $1
         "#,
@@ -244,13 +257,17 @@ async fn verify_blob_exists(blob_name: &str) -> Result<bool> {
     }
 }
 
-async fn download_and_checksum(blob_name: &str) -> Result<Vec<u8>> {
+async fn download_and_checksum(blob_name: &str, etag: &str) -> Result<Vec<u8>> {
     use futures_util::StreamExt;
     use sha2::{Digest, Sha256};
+    use azure_storage_blob::models::BlobClientDownloadOptions;
 
     let blob_client = create_blob_client(blob_name)?;
     let download_result = blob_client
-        .download(None)
+        .download(Some(BlobClientDownloadOptions {
+            if_match: Some(etag.into()),
+            ..Default::default()
+        }))
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -265,9 +282,9 @@ async fn download_and_checksum(blob_name: &str) -> Result<Vec<u8>> {
     Ok(hasher.finalize().to_vec())
 }
 
-async fn verify_apk_with_aapt2(blob_name: &str) -> Result<()> {
+async fn verify_apk_with_aapt2(blob_name: &str, etag: &str) -> Result<()> {
     // Download APK to temporary file
-    let temp_path = download_to_temp(blob_name).await?;
+    let temp_path = download_to_temp(blob_name, etag).await?;
 
     // Run aapt2 dump badging to verify structure and extract package info
     let output = tokio::process::Command::new("aapt2")
@@ -317,13 +334,17 @@ async fn verify_apk_with_aapt2(blob_name: &str) -> Result<()> {
     Ok(())
 }
 
-async fn download_to_temp(blob_name: &str) -> Result<String> {
+async fn download_to_temp(blob_name: &str, etag: &str) -> Result<String> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
+    use azure_storage_blob::models::BlobClientDownloadOptions;
 
     let blob_client = create_blob_client(blob_name)?;
     let download_result = blob_client
-        .download(None)
+        .download(Some(BlobClientDownloadOptions {
+            if_match: Some(etag.into()),
+            ..Default::default()
+        }))
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     let mut stream = download_result.body;
@@ -340,9 +361,9 @@ async fn download_to_temp(blob_name: &str) -> Result<String> {
     Ok(temp_path)
 }
 
-async fn scan_with_clamav(blob_name: &str) -> Result<()> {
+async fn scan_with_clamav(blob_name: &str, etag: &str) -> Result<()> {
     // Download APK to temporary file
-    let temp_path = download_to_temp(blob_name).await?;
+    let temp_path = download_to_temp(blob_name, etag).await?;
 
     // Run clamdscan (ClamAV daemon client)
     let output = tokio::process::Command::new("clamdscan")
