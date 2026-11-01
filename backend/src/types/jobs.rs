@@ -6,6 +6,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobType {
+    CompleteUpload,
     VerifyApk,
     PrepareDistribution,
 }
@@ -13,6 +14,7 @@ pub enum JobType {
 impl JobType {
     pub fn as_str(&self) -> &'static str {
         match self {
+            JobType::CompleteUpload => "complete_upload",
             JobType::VerifyApk => "verify_apk",
             JobType::PrepareDistribution => "prepare_distribution",
         }
@@ -20,6 +22,7 @@ impl JobType {
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
+            "complete_upload" => Some(JobType::CompleteUpload),
             "verify_apk" => Some(JobType::VerifyApk),
             "prepare_distribution" => Some(JobType::PrepareDistribution),
             _ => None,
