@@ -14,9 +14,13 @@ use clap::Parser;
 use sqlx::{PgPool, Postgres, Transaction};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::signal;
+use tokio::{signal, time::{sleep, timeout}};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
+
+const COMPLETION_ATTEMPTS: u32 = 3;
+const COMPLETION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+const COMPLETION_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
 #[derive(Parser, Debug)]
 #[command(name = "upload_completion_worker", about = "Commits and finalizes uploaded blobs")]
@@ -87,18 +91,23 @@ async fn process_completion_job(state: &AppState, job: &BackgroundJob) -> Result
         return Ok(());
     }
 
-    let block_blob = create_block_blob_client(&upload.blob_name)?;
+    let block_blob: azure_storage_blob::BlockBlobClient = create_block_blob_client(&upload.blob_name)?;
     let blob = create_blob_client(&upload.blob_name)?;
     let expected_size = u64::try_from(upload.expected_size_bytes)?;
-    let (actual_size, etag) =
-        validate_and_commit_upload(&block_blob, &blob, expected_size, CHUNK_SIZE_BYTES).await?;
+    let (actual_size, etag) = validate_and_commit_with_retry(
+        &block_blob,
+        &blob,
+        expected_size,
+        CHUNK_SIZE_BYTES,
+    )
+    .await?;
     if actual_size != expected_size {
         fail_job(state, job.id, "Committed blob size does not match expected size", false).await?;
         return Ok(());
     }
 
     let mut tx: Transaction<'_, Postgres> = state.db.begin().await?;
-    let updated = sqlx::query(
+    let updated: sqlx::postgres::PgQueryResult = sqlx::query(
         "UPDATE uploads SET actual_size_bytes = $1, etag = $2, completed_at = now()
          WHERE id = $3 AND status = 'PROCESSING_PENDING'",
     )
@@ -115,6 +124,40 @@ async fn process_completion_job(state: &AppState, job: &BackgroundJob) -> Result
     complete_job(state, job.id).await?;
     info!(job_id = %job.id, file_id = %job.file_id, etag = %etag, "Upload committed and queued for processing");
     Ok(())
+}
+
+async fn validate_and_commit_with_retry(
+    block_blob: &azure_storage_blob::BlockBlobClient,
+    blob: &azure_storage_blob::clients::BlobClient,
+    expected_size: u64,
+    chunk_size: u64,
+) -> Result<(u64, String)> {
+    let mut last_error = None;
+
+    for attempt in 1..=COMPLETION_ATTEMPTS {
+        match timeout(
+            COMPLETION_ATTEMPT_TIMEOUT,
+            validate_and_commit_upload(block_blob, blob, expected_size, chunk_size),
+        )
+        .await
+        {
+            Ok(Ok(result)) => return Ok(result),
+            Ok(Err(error)) => last_error = Some(error),
+            Err(_) => {
+                last_error = Some(anyhow::anyhow!(
+                    "upload completion attempt timed out after {} seconds",
+                    COMPLETION_ATTEMPT_TIMEOUT.as_secs()
+                ));
+            }
+        }
+
+        if attempt < COMPLETION_ATTEMPTS {
+            let backoff = COMPLETION_RETRY_BACKOFF * 2u32.pow(attempt - 1);
+            sleep(backoff).await;
+        }
+    }
+
+    Err(last_error.expect("completion attempts always produce an error"))
 }
 
 async fn get_upload_record(db: &PgPool, file_id: uuid::Uuid) -> Result<UploadRecord> {
