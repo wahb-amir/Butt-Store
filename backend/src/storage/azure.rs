@@ -1,28 +1,28 @@
-use anyhow::{Result};
 use crate::config::Config;
+use anyhow::Result;
 use azure_core::credentials::Secret;
+use azure_core::http::{RequestContent, XmlFormat};
 use azure_identity::ClientSecretCredential;
 use azure_storage_blob::BlobServiceClient;
-use azure_storage_sas::SasBuilder;
-use azure_core::http::{ RequestContent, XmlFormat};
 use azure_storage_blob::clients::BlockBlobClient;
 use azure_storage_blob::models::{
     BlobClientGetPropertiesResultHeaders, BlockListType, BlockLookupList,
 };
+use futures_util::TryStreamExt;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use std::io::{Error as IoError, ErrorKind};
 use std::sync::{Arc, OnceLock};
 use time::{Duration, OffsetDateTime};
 use url::Url;
-use std::io::{Error as IoError, ErrorKind};
-use futures_util::{TryStreamExt};
 
 pub type StorageResult<T> = Result<T>;
 
 static BLOB_SERVICE: OnceLock<Result<Arc<BlobServiceClient>>> = OnceLock::new();
 
 pub fn init_blob_service() -> StorageResult<Arc<BlobServiceClient>> {
-    let service: &Result<Arc<BlobServiceClient>> = BLOB_SERVICE.get_or_init(|| {
-        create_blob_service().map(Arc::new)
-    });
+    let service: &Result<Arc<BlobServiceClient>> =
+        BLOB_SERVICE.get_or_init(|| create_blob_service().map(Arc::new));
 
     match service {
         Ok(service) => Ok(Arc::clone(service)),
@@ -65,43 +65,67 @@ pub async fn generate_upload_sas_url_for_blob(
     blob_path: &str,
 ) -> StorageResult<(Url, OffsetDateTime)> {
     let config = Config::from_env();
-    let service_client = init_blob_service()?;
-
     // 2. Construct the exact hierarchical file path requested
     let starts_on = OffsetDateTime::now_utc();
     let expires_on = starts_on + Duration::minutes(15);
 
-    // 4. Request a short-lived User Delegation Key from Azure via Entra ID
-    let key_info = azure_storage_blob::models::KeyInfo {
-        delegated_user_tid: Some(config.azure_tenant_id.clone()),
-        start: Some(starts_on),
-        expiry: Some(expires_on),
-    };
+    // The current azure_storage_sas crate supports user delegation keys only.
+    // Sign the equivalent blob service SAS directly with the storage account key.
+    let sas_time_format =
+        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
+    let signed_start = starts_on
+        .format(&sas_time_format)
+        .map_err(|e| anyhow::anyhow!("Failed to format SAS start time: {e}"))?;
+    let signed_expiry = expires_on
+        .format(&sas_time_format)
+        .map_err(|e| anyhow::anyhow!("Failed to format SAS expiry time: {e}"))?;
+    let signed_version = "2023-11-03";
+    let canonicalized_resource = format!(
+        "/blob/{}/{}/{}",
+        config.azure_storage_account_name, config.azure_storage_container_name, blob_path
+    );
+    let string_to_sign = [
+        "cw",
+        &signed_start,
+        &signed_expiry,
+        &canonicalized_resource,
+        "",
+        "",
+        "https",
+        signed_version,
+        "b",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ]
+    .join("\n")
+        + "\n";
 
-    let user_delegation_key = service_client
-        .get_user_delegation_key(
-            key_info
-                .try_into()
-                .map_err(|e: azure_core::Error| anyhow::anyhow!(e))?,
-            None,
-        )
-        .await
-        .map_err(|e: azure_core::Error| anyhow::anyhow!(e))?;
-    let user_delegation_key = user_delegation_key
-        .into_model()
-        .map_err(|e: azure_core::Error| anyhow::anyhow!(e))?;
-
-    // 5. Build the SAS token with write permissions required for staging & committing blocks
-    let sas_token = SasBuilder::new(
-        &config.azure_storage_account_name,
-        &user_delegation_key,
-        expires_on,
+    let account_key = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        &config.azure_storage_master_key,
     )
-    .map_err(|e: azure_core::Error| anyhow::anyhow!(e))?
-    .blob(&config.azure_storage_container_name, blob_path)
-    .create()
-    .write()
-    .build();
+    .map_err(|e| anyhow::anyhow!("AZURE_STORAGE_MASTER_KEY is not valid base64: {e}"))?;
+    let mut signer = Hmac::<Sha256>::new_from_slice(&account_key)
+        .map_err(|e| anyhow::anyhow!("Failed to initialize SAS signer: {e}"))?;
+    signer.update(string_to_sign.as_bytes());
+    let signature = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        signer.finalize().into_bytes(),
+    );
+
+    let mut sas_query = url::form_urlencoded::Serializer::new(String::new());
+    sas_query.append_pair("sv", signed_version);
+    sas_query.append_pair("st", &signed_start);
+    sas_query.append_pair("se", &signed_expiry);
+    sas_query.append_pair("spr", "https");
+    sas_query.append_pair("sp", "cw");
+    sas_query.append_pair("sr", "b");
+    sas_query.append_pair("sig", &signature);
+    let sas_token = sas_query.finish();
 
     // 6. Assemble the final URL with the SAS token query attached
     let mut sas_url = Url::parse(&format!(
@@ -121,24 +145,20 @@ pub fn create_block_blob_client(blob_path: &str) -> StorageResult<BlockBlobClien
     let service_client = init_blob_service()?;
 
     // Derive the standard BlobClient from the service and container config
-    let blob_client = service_client.blob_client(
-        &config.azure_storage_container_name,
-        blob_path,
-    );
+    let blob_client = service_client.blob_client(&config.azure_storage_container_name, blob_path);
 
     // Convert it into a BlockBlobClient to perform block-level operations (like commit_upload)
     Ok(blob_client.block_blob_client())
 }
 
 /// Create a base BlobClient for operations like download, get_properties, exists.
-pub fn create_blob_client(blob_path: &str) -> StorageResult<azure_storage_blob::clients::BlobClient> {
+pub fn create_blob_client(
+    blob_path: &str,
+) -> StorageResult<azure_storage_blob::clients::BlobClient> {
     let config = Config::from_env();
     let service_client = init_blob_service()?;
 
-    let blob_client = service_client.blob_client(
-        &config.azure_storage_container_name,
-        blob_path,
-    );
+    let blob_client = service_client.blob_client(&config.azure_storage_container_name, blob_path);
 
     Ok(blob_client)
 }
@@ -152,14 +172,10 @@ pub async fn delete_blob(blob_path: &str) -> StorageResult<()> {
     Ok(())
 }
 
-
 const MAX_BLOCKS_PER_BLOB: u64 = 50_000;
 
 /// Returns (block_index, expected_block_size_bytes).
-fn expected_blocks(
-    file_size: u64,
-    chunk_size: u64,
-) -> Result<Vec<(u64, u64)>, IoError> {
+fn expected_blocks(file_size: u64, chunk_size: u64) -> Result<Vec<(u64, u64)>, IoError> {
     if chunk_size == 0 {
         return Err(IoError::new(
             ErrorKind::InvalidInput,
@@ -175,8 +191,7 @@ fn expected_blocks(
     }
 
     // Integer ceiling division.
-    let count = file_size / chunk_size
-        + u64::from(file_size % chunk_size != 0);
+    let count = file_size / chunk_size + u64::from(file_size % chunk_size != 0);
 
     if count > MAX_BLOCKS_PER_BLOB {
         return Err(IoError::new(
@@ -187,27 +202,19 @@ fn expected_blocks(
 
     Ok((0..count)
         .map(|index| {
-            let expected_size =
-                chunk_size.min(file_size - index * chunk_size);
+            let expected_size = chunk_size.min(file_size - index * chunk_size);
 
             (index, expected_size)
         })
         .collect())
 }
 
-pub async fn commit_upload(
-    blob: &BlockBlobClient,
-    file_size: u64,
-    chunk_size: u64,
-) -> Result<()> {
-
+pub async fn commit_upload(blob: &BlockBlobClient, file_size: u64, chunk_size: u64) -> Result<()> {
     let blocks = expected_blocks(file_size, chunk_size)?;
 
     let ordered_ids: Vec<Vec<u8>> = blocks
         .iter()
-        .map(|(index, _expected_size)| {
-            format!("block-{index:08}").into_bytes()
-        })
+        .map(|(index, _expected_size)| format!("block-{index:08}").into_bytes())
         .collect();
 
     let block_list = BlockLookupList {
@@ -216,8 +223,9 @@ pub async fn commit_upload(
         uncommitted: None,
     };
 
-    let body: RequestContent<BlockLookupList, XmlFormat> =
-        block_list.try_into().map_err(|e: azure_core::Error| anyhow::anyhow!(e))?;
+    let body: RequestContent<BlockLookupList, XmlFormat> = block_list
+        .try_into()
+        .map_err(|e: azure_core::Error| anyhow::anyhow!(e))?;
 
     blob.commit_block_list(body, None)
         .await
@@ -246,13 +254,18 @@ pub async fn validate_and_commit_upload(
         .map_err(|e| anyhow::anyhow!("Failed to decode committed blocks: {e}"))?;
     let staged = block_list.uncommitted_blocks.unwrap_or_default();
     if staged.len() != expected.len()
-        || staged.iter().zip(&expected_ids).any(|(block, id)| block.name.as_ref() != Some(id))
+        || staged
+            .iter()
+            .zip(&expected_ids)
+            .any(|(block, id)| block.name.as_ref() != Some(id))
         || staged
             .iter()
             .zip(expected.iter())
             .any(|(block, (_, size))| block.size != Some(i64::try_from(*size).unwrap_or(-1)))
     {
-        return Err(anyhow::anyhow!("Committed block list does not match expected upload"));
+        return Err(anyhow::anyhow!(
+            "Committed block list does not match expected upload"
+        ));
     }
 
     commit_upload(blob, file_size, chunk_size).await?;

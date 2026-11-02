@@ -6,6 +6,7 @@ pub struct Config {
     pub secret: String,
     pub database_url: String,
     pub azure_storage_account_name: String,
+    pub azure_storage_master_key: String,
     pub azure_storage_container_name: String,
     pub azure_tenant_id: String,
     pub azure_client_id: String,
@@ -26,6 +27,8 @@ impl Config {
                 .expect("DATABASE_URL environment variable must be set"),
             azure_storage_account_name: env::var("AZURE_STORAGE_ACCOUNT_NAME")
                 .expect("AZURE_STORAGE_ACCOUNT_NAME must be set"),
+            azure_storage_master_key: env::var("AZURE_STORAGE_MASTER_KEY")
+                .expect("AZURE_STORAGE_MASTER_KEY must be set"),
             azure_storage_container_name: env::var("AZURE_STORAGE_CONTAINER_NAME")
                 .expect("AZURE_STORAGE_CONTAINER_NAME must be set"),
             azure_tenant_id: env::var("AZURE_TENANT_ID").expect("AZURE_TENANT_ID must be set"),
