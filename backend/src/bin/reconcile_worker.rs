@@ -1,5 +1,6 @@
 use anyhow::Result;
 use backend::{
+    api::uploads::models::UploadStatus,
     config::Config,
     db::create_pool,
     state::AppState,
@@ -223,8 +224,8 @@ async fn reconcile_blob(
     match existing_upload {
         Some(upload) => {
             // Upload record exists - check status
-            match upload.status.as_str() {
-                "PENDING" | "UPLOADING" => {
+            match upload.status {
+                UploadStatus::Pending => {
                     // Upload not yet completed - this is an orphaned blob
                     // Could be a completed upload where DB transaction failed
                     info!(blob = %blob_name, upload_id = %upload.id, "Found orphaned committed blob, checking for verification job");
@@ -247,7 +248,12 @@ async fn reconcile_blob(
                     info!(blob = %blob_name, "Verification job already exists");
                     Ok(ReconcileAction::NoAction)
                 }
-                "COMPLETED" | "PENDING_VERIFICATION" | "VERIFIED" | "READY_FOR_DISTRIBUTION" | "QUARANTINED" => {
+                UploadStatus::Completed
+                | UploadStatus::ProcessingPending
+                | UploadStatus::PendingVerification
+                | UploadStatus::Verified
+                | UploadStatus::ReadyForDistribution
+                | UploadStatus::Quarantined => {
                     // Valid completed states - check for jobs
                     let job_exists = sqlx::query_scalar::<_, bool>(
                         "SELECT EXISTS(SELECT 1 FROM background_jobs WHERE file_id = $1 AND job_type = 'verify_apk')",
@@ -256,7 +262,7 @@ async fn reconcile_blob(
                     .fetch_one(&state.db)
                     .await?;
 
-                    if !job_exists && matches!(upload.status.as_str(), "PENDING_VERIFICATION") {
+                    if !job_exists && upload.status == UploadStatus::PendingVerification {
                         create_job(state, upload.id, JobType::VerifyApk).await?;
                         info!(blob = %blob_name, upload_id = %upload.id, "Created missing verification job for pending_verification");
                         return Ok(ReconcileAction::CreatedJob);
@@ -264,7 +270,7 @@ async fn reconcile_blob(
 
                     Ok(ReconcileAction::NoAction)
                 }
-                "FAILED" => {
+                UploadStatus::Failed => {
                     delete_blob(blob_name).await?;
                     mark_upload_deleted(
                         &state.db,
@@ -365,5 +371,5 @@ async fn mark_upload_deleted(
 #[derive(sqlx::FromRow)]
 struct UploadRecord {
     id: uuid::Uuid,
-    status: String,
+    status: UploadStatus,
 }

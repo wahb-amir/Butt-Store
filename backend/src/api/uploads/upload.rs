@@ -101,6 +101,7 @@ async fn find_upload(
             content_type,
             status,
             expected_size_bytes,
+            actual_size_bytes,
             expires_at
         FROM uploads
         WHERE user_id = $1
@@ -152,7 +153,7 @@ async fn expire_upload_if_due(db: &PgPool, upload_id: Uuid) -> Result<(), AppErr
             status = 'EXPIRED',
             failure_reason = 'Upload session deadline exceeded'
         WHERE id = $1
-          AND status IN ('PENDING', 'UPLOADING')
+          AND status = 'PENDING'
           AND expires_at <= now()
         "#,
     )
@@ -165,7 +166,7 @@ async fn expire_upload_if_due(db: &PgPool, upload_id: Uuid) -> Result<(), AppErr
 }
 
 fn validate_upload_session(record: &UploadRecord) -> Result<(), AppErrorWithMessage> {
-    if !matches!(record.status.as_str(), "PENDING" | "UPLOADING") {
+    if !matches!(record.status, super::models::UploadStatus::Pending) {
         return Err(
             AppError::Conflict.with_message("Upload session is no longer eligible".to_string())
         );
@@ -354,7 +355,7 @@ pub(crate) async fn upload(
         mime: record.content_type.clone(),
         file_size: req.file_size,
         blob_name: record.blob_name.clone(),
-        status: record.status.clone(),
+        status: record.status.as_str().to_string(),
         idempotency_key: req.idempotency_key,
     };
 

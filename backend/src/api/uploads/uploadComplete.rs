@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::{
     auth::authenticate,
-    models::UploadRecord,
+    models::{UploadRecord, UploadStatus},
     utils::db_err,
 };
 
@@ -57,30 +57,37 @@ pub(crate) async fn complete_upload(
         }
     }
 
-    if matches!(upload.status.as_str(), "PROCESSING_PENDING" | "PENDING_VERIFICATION" | "QUARANTINED" | "VERIFIED" | "READY_FOR_DISTRIBUTION") {
+    if matches!(
+        upload.status,
+        UploadStatus::ProcessingPending
+            | UploadStatus::PendingVerification
+            | UploadStatus::Quarantined
+            | UploadStatus::Verified
+            | UploadStatus::ReadyForDistribution
+    ) {
         if let Some(job_id) = find_completion_job(&state.db, upload_id).await? {
             return Ok((
                 StatusCode::OK,
                 Json(CompleteResponse {
                     job_id,
-                    status: upload.status,
+                    status: upload.status.as_str().to_string(),
                 }),
             ));
         }
     }
 
-    if upload.status != "PENDING" {
+    if upload.status != UploadStatus::Pending {
         return Err(AppError::Conflict.with_message("Upload is not in PENDING state"));
     }
     validate_upload_session(&upload)?;
 
     let job_id = enqueue_completion_job(&state.db, upload_id, checksum_sha256).await?;
-    upload.status = "PROCESSING_PENDING".to_string();
+    upload.status = UploadStatus::ProcessingPending;
     Ok((
         StatusCode::OK,
         Json(CompleteResponse {
             job_id,
-            status: upload.status,
+            status: upload.status.as_str().to_string(),
         }),
     ))
 }

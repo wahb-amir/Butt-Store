@@ -1,6 +1,6 @@
 mod auth;
 pub mod config;
-mod models;
+pub mod models;
 pub mod upload;
 #[allow(non_snake_case)]
 mod uploadComplete;

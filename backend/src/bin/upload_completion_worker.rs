@@ -1,6 +1,7 @@
 use anyhow::Result;
 use backend::{
     api::uploads::config::CHUNK_SIZE_BYTES,
+    api::uploads::models::UploadStatus,
     config::Config,
     db::create_pool,
     state::AppState,
@@ -97,7 +98,7 @@ async fn run_worker(state: Arc<AppState>, args: Args) -> Result<()> {
 
 async fn process_completion_job(state: &AppState, job: &BackgroundJob) -> Result<()> {
     let upload = get_upload_record(&state.db, job.file_id).await?;
-    if upload.status != "PROCESSING_PENDING" {
+    if upload.status != UploadStatus::ProcessingPending {
         let reason = "Upload is not in PROCESSING_PENDING state";
         fail_job(state, job.id, reason, false).await?;
         update_upload_failure(&state.db, job.file_id, reason).await?;
@@ -205,6 +206,6 @@ async fn get_upload_record(db: &PgPool, file_id: uuid::Uuid) -> Result<UploadRec
 #[derive(sqlx::FromRow)]
 struct UploadRecord {
     blob_name: String,
-    status: String,
+    status: UploadStatus,
     expected_size_bytes: i64,
 }

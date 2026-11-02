@@ -1,5 +1,6 @@
 use anyhow::Result;
 use backend::{
+    api::uploads::models::UploadStatus,
     config::Config,
     db::create_pool,
     state::AppState,
@@ -144,7 +145,7 @@ async fn process_verification_job(
     // Get upload record
     let upload = get_upload_record(&state.db, file_id).await?;
 
-    if upload.status != "PROCESSING_PENDING" {
+    if upload.status != UploadStatus::ProcessingPending {
         fail_job(
             state,
             job.id,
@@ -177,7 +178,7 @@ async fn process_verification_job(
     if !verify_blob_exists(blob_name).await? {
         let err = "Blob does not exist in Azure storage";
         fail_job(state, job.id, err, false).await?;
-        update_upload_failure(&state.db, file_id, "FAILED", err).await?;
+        update_upload_failure(&state.db, file_id, UploadStatus::Failed, err).await?;
         return Ok(());
     }
 
@@ -201,7 +202,7 @@ async fn process_verification_job(
     if let Err(e) = verify_apk_with_aapt2(blob_name, etag).await {
         let err = format!("APK verification failed: {}", e);
         fail_job(state, job.id, &err, false).await?;
-        update_upload_failure(&state.db, file_id, "QUARANTINED", &err).await?;
+        update_upload_failure(&state.db, file_id, UploadStatus::Quarantined, &err).await?;
         return Ok(());
     }
     info!(job_id = %job.id, "APK structure and signatures verified");
@@ -213,14 +214,18 @@ async fn process_verification_job(
         // Distinguish between malware detected (permanent failure) and scanner error (retry)
         let is_malware = err.to_lowercase().contains("malware") || err.to_lowercase().contains("virus");
         fail_job(state, job.id, &err, !is_malware).await?;
-        let status = if is_malware { "QUARANTINED" } else { "FAILED" };
+        let status = if is_malware {
+            UploadStatus::Quarantined
+        } else {
+            UploadStatus::Failed
+        };
         update_upload_failure(&state.db, file_id, status, &err).await?;
         return Ok(());
     }
     info!(job_id = %job.id, "Malware scan clean");
 
     let mut tx = state.db.begin().await?;
-    update_upload_status_tx(&mut tx, file_id, "VERIFIED").await?;
+    update_upload_status_tx(&mut tx, file_id, UploadStatus::Verified).await?;
     create_job_tx(&mut tx, file_id, JobType::PrepareDistribution).await?;
     tx.commit().await?;
 
@@ -259,7 +264,7 @@ struct UploadRecord {
     blob_name: String,
     original_filename: String,
     content_type: String,
-    status: String,
+    status: UploadStatus,
     expected_size_bytes: i64,
     actual_size_bytes: Option<i64>,
     etag: Option<String>,
@@ -449,7 +454,7 @@ async fn scan_with_clamav(blob_name: &str, etag: &str) -> Result<()> {
 async fn update_upload_failure(
     db: &PgPool,
     file_id: uuid::Uuid,
-    status: &str,
+    status: UploadStatus,
     reason: &str,
 ) -> Result<()> {
     sqlx::query(
@@ -471,7 +476,7 @@ async fn update_upload_failure(
 async fn update_upload_status_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     file_id: uuid::Uuid,
-    status: &str,
+    status: UploadStatus,
 ) -> Result<()> {
     sqlx::query(
         r#"

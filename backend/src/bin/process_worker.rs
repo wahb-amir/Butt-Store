@@ -1,5 +1,6 @@
 use anyhow::Result;
 use backend::{
+    api::uploads::models::UploadStatus,
     config::Config,
     db::create_pool,
     state::AppState,
@@ -139,8 +140,8 @@ async fn process_preparation_job(
     let upload = get_upload_record(&state.db, file_id).await?;
 
     // Verify upload is in VERIFIED state
-    if upload.status != "VERIFIED" {
-        let err = format!("Upload is not in VERIFIED state (current: {})", upload.status);
+    if upload.status != UploadStatus::Verified {
+        let err = format!("Upload is not in VERIFIED state (current: {:?})", upload.status);
         fail_job(state, job.id, &err, false).await?;
         update_upload_failure(&state.db, file_id, &err).await?;
         return Ok(());
@@ -159,7 +160,7 @@ async fn process_preparation_job(
     info!(job_id = %job.id, "Distribution preparation completed (stub)");
 
     // Update upload status to READY_FOR_DISTRIBUTION
-    update_upload_status(&state.db, file_id, "READY_FOR_DISTRIBUTION").await?;
+    update_upload_status(&state.db, file_id, UploadStatus::ReadyForDistribution).await?;
 
     complete_job(state, job.id).await?;
     info!(job_id = %job.id, file_id = %file_id, "Distribution preparation completed successfully");
@@ -195,7 +196,7 @@ struct UploadRecord {
     blob_name: String,
     original_filename: String,
     content_type: String,
-    status: String,
+    status: UploadStatus,
     expected_size_bytes: i64,
     actual_size_bytes: Option<i64>,
     etag: Option<String>,
@@ -206,7 +207,7 @@ struct UploadRecord {
 async fn update_upload_status(
     db: &PgPool,
     file_id: uuid::Uuid,
-    status: &str,
+    status: UploadStatus,
 ) -> Result<()> {
     sqlx::query(
         r#"
