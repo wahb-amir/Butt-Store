@@ -42,10 +42,17 @@ async fn main() -> Result<()> {
         .init();
     dotenvy::dotenv().ok();
     let config = Config::from_env();
+
     let pool = create_pool(&config.database_url).await?;
+    info!("Database connected");
     let _blob_service = init_blob_service()?;
+    info!("Azure Blob Service connected");
     info!("Database and Azure Blob Storage dependencies verified");
-    run_worker(Arc::new(AppState { db: pool }), Args::parse()).await
+
+    let args = Args::parse();
+    info!("Starting upload completion worker: {}", args.worker_id);
+
+    run_worker(Arc::new(AppState { db: pool }), args).await
 }
 
 async fn run_worker(state: Arc<AppState>, args: Args) -> Result<()> {
@@ -55,12 +62,19 @@ async fn run_worker(state: Arc<AppState>, args: Args) -> Result<()> {
 
     loop {
         tokio::select! {
-            _ = sigterm.recv() => break,
-            _ = sigint.recv() => break,
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, shutting down...");
+                break;
+            },
+            _ = sigint.recv() => {
+                info!("Received SIGINT, shutting down...");
+                break;
+            },
             _ = tokio::time::sleep(Duration::from_secs(args.poll_interval)) => {
                 match claim_job_type(&state, JobType::CompleteUpload, &args.worker_id).await {
                     Ok(Some(job)) => {
                         empty_polls = 0;
+                        info!(job_id = %job.id, file_id = %job.file_id, "Claimed upload completion job");
                         let result = tokio::time::timeout(
                             COMPLETION_JOB_TIMEOUT,
                             process_completion_job(&state, &job),
@@ -82,11 +96,12 @@ async fn run_worker(state: Arc<AppState>, args: Args) -> Result<()> {
                             let backoff = Duration::from_secs(
                                 (args.poll_interval * 2_u64.pow(empty_polls.min(6))).min(60),
                             );
+                            info!(empty_polls, backoff_secs = backoff.as_secs(), "No jobs available, backing off");
                             tokio::time::sleep(backoff).await;
                         }
                     }
                     Err(error) => {
-                        error!(error = %error, "Failed to claim upload completion job");
+                        error!(error = %error, "Failed to claim job");
                         tokio::time::sleep(Duration::from_secs(5)).await;
                     }
                 }
