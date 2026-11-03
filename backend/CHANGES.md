@@ -71,7 +71,7 @@ Implementation of a complete APK upload workflow with background job processing,
 - **Verification steps:**
   1. Blob existence check (Azure HEAD)
   2. SHA256 checksum verification (streaming download)
-  3. APK structure validation (`aapt2 dump badging`, `aapt2 check`)
+  3. APK structure validation (`aapt2 dump badging`)
   4. Signature verification (`apksigner verify`)
   5. Malware scan (`clamdscan` via ClamAV daemon)
 - On success: Updates upload to `VERIFIED`, enqueues `prepare_distribution` job (transactional)

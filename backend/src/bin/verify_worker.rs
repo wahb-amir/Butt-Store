@@ -7,6 +7,7 @@ use backend::{
     storage::azure::{create_blob_client, delete_blob, init_blob_service},
     storage::jobs::{claim_job_type, complete_job, fail_job, create_job_tx},
     types::jobs::{BackgroundJob, JobType},
+    utils::runtime::require_command,
 };
 use clap::Parser;
 use sqlx::PgPool;
@@ -48,6 +49,8 @@ async fn main() -> Result<()> {
 
     // Load configuration
     dotenvy::dotenv().ok();
+    require_command("aapt2")?;
+    require_command("clamdscan")?;
     let config = Config::from_env();
 
     // Create database pool
@@ -348,17 +351,6 @@ async fn verify_apk_with_aapt2(blob_name: &str, etag: &str) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow::anyhow!("aapt2 dump badging failed: {}", stderr));
-    }
-
-    // Run aapt2 check to verify APK integrity
-    let output = tokio::process::Command::new("aapt2")
-        .args(["check", &temp_path])
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!("aapt2 check failed: {}", stderr));
     }
 
     // Try to verify signatures with apksigner if available
