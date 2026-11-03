@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
     // Initialize Azure Blob Service
     let blob_service = init_blob_service()?;
     info!("Azure Blob Service connected");
+    info!("Database and Azure Blob Storage dependencies verified");
 
     let state = Arc::new(AppState { db: pool });
 

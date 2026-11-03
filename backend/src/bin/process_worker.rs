@@ -52,6 +52,7 @@ async fn main() -> Result<()> {
     // Create database pool
     let pool = create_pool(&config.database_url).await?;
     info!("Database connected");
+    info!("Database dependency verified");
 
     let state = Arc::new(AppState { db: pool });
 

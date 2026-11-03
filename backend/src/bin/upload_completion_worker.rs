@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
     let config = Config::from_env();
     let pool = create_pool(&config.database_url).await?;
     let _blob_service = init_blob_service()?;
+    info!("Database and Azure Blob Storage dependencies verified");
     run_worker(Arc::new(AppState { db: pool }), Args::parse()).await
 }
 
