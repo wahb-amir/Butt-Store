@@ -33,7 +33,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(service_client) => match service_client.list_containers(None) {
                 Ok(mut stream) => match stream.next().await {
                     Some(Ok(_)) => {
-                        println!("Successfully connected and authenticated with Azure Blob Service!");
+                        println!(
+                            "Successfully connected and authenticated with Azure Blob Service!"
+                        );
                         true
                     }
                     Some(Err(error)) => {

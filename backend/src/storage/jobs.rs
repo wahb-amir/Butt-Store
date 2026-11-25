@@ -1,8 +1,8 @@
-use anyhow::{Result};
 use crate::{
     state::AppState,
     types::jobs::{BackgroundJob, JobType},
 };
+use anyhow::Result;
 use sqlx::{query, query_as};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -10,10 +10,7 @@ use uuid::Uuid;
 const WORKER_LEASE_SECONDS: i64 = 1800; // 30 minutes
 const MAX_JOB_ATTEMPTS: i32 = 5;
 
-pub async fn claim_job(
-    state: &AppState,
-    _worker_id: &str,
-) -> Result<Option<BackgroundJob>> {
+pub async fn claim_job(state: &AppState, _worker_id: &str) -> Result<Option<BackgroundJob>> {
     let now = OffsetDateTime::now_utc();
     let lease_until = now + time::Duration::seconds(WORKER_LEASE_SECONDS);
     recover_expired_jobs(state, now).await?;
@@ -149,10 +146,7 @@ pub async fn claim_job_by_id(
 }
 
 /// Mark a job as completed successfully.
-pub async fn complete_job(
-    state: &AppState,
-    job_id: Uuid,
-) -> Result<()> {
+pub async fn complete_job(state: &AppState, job_id: Uuid) -> Result<()> {
     let now = OffsetDateTime::now_utc();
 
     query(
@@ -178,12 +172,7 @@ pub async fn complete_job(
 }
 
 /// Mark a job as failed with error message, making it available for retry.
-pub async fn fail_job(
-    state: &AppState,
-    job_id: Uuid,
-    error: &str,
-    retry: bool,
-) -> Result<()> {
+pub async fn fail_job(state: &AppState, job_id: Uuid, error: &str, retry: bool) -> Result<()> {
     let now = OffsetDateTime::now_utc();
 
     if retry {
@@ -241,11 +230,7 @@ pub async fn fail_job(
 }
 
 /// Create a new background job.
-pub async fn create_job(
-    state: &AppState,
-    file_id: Uuid,
-    job_type: JobType,
-) -> Result<Uuid> {
+pub async fn create_job(state: &AppState, file_id: Uuid, job_type: JobType) -> Result<Uuid> {
     let job_id = Uuid::new_v4();
 
     query(
@@ -295,10 +280,7 @@ pub async fn create_job_tx(
 }
 
 /// Get job by ID for status polling.
-pub async fn get_job(
-    state: &AppState,
-    job_id: Uuid,
-) -> Result<Option<BackgroundJob>> {
+pub async fn get_job(state: &AppState, job_id: Uuid) -> Result<Option<BackgroundJob>> {
     let job = query_as::<_, BackgroundJob>(
         r#"
         SELECT
@@ -322,10 +304,7 @@ pub async fn get_job(
 
 /// Release a job lock (mark as pending again) - useful if worker crashes before completing.
 /// This is handled automatically by the lease expiry, but can be called manually.
-pub async fn release_job_lock(
-    state: &AppState,
-    job_id: Uuid,
-) -> Result<()> {
+pub async fn release_job_lock(state: &AppState, job_id: Uuid) -> Result<()> {
     query(
         r#"
         UPDATE background_jobs

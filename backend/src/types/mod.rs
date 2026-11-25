@@ -1,3 +1,2 @@
-pub mod users;
-pub mod outbox;
 pub mod jobs;
+pub mod users;

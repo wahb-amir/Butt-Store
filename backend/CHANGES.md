@@ -5,6 +5,69 @@ Implementation of a complete APK upload workflow with background job processing,
 
 ---
 
+## Architecture Refactor — Module Reorganisation
+
+### Dead code removed
+- **`src/lib/azure.rs`** — Deleted. Was a parallel, stale Azure client implementation superseded
+  by `src/storage/azure.rs`. It was never referenced via `lib.rs` and had a different error type
+  (`Box<dyn Error>` vs `anyhow::Result`) and an outdated SAS signing path.
+- **`src/api/uploads/complete.rs`** — Deleted. Unreferenced draft of the upload-completion
+  endpoint; the active implementation is `upload_complete.rs`.
+- **`src/types/outbox.rs`** — Deleted. `OutboxEventPayload` was defined but never read or written
+  anywhere in the codebase.
+
+### Renames
+- **`src/api/uploads/uploadComplete.rs`** → **`upload_complete.rs`** — Corrected to follow Rust
+  snake_case naming convention. The router reference and `#[allow(non_snake_case)]` annotation
+  were updated accordingly.
+
+### New: `src/workers/` module
+
+Centralises the shared infrastructure that was previously copy-pasted across all four worker
+binaries:
+
+#### `src/workers/context.rs` — `WorkerContext`
+- `WorkerContext::new_db_only(config)` — connects to PostgreSQL only (used by `process_worker`,
+  which does not access Azure).
+- `WorkerContext::new_with_azure(config)` — connects to PostgreSQL + Azure Blob Storage (used by
+  `verify_worker`, `upload_completion_worker`, `reconcile_worker`).
+- `WorkerContext::as_app_state()` — cheap conversion to `AppState` for `storage::jobs` functions.
+- Each worker receives only the dependencies it actually uses.
+
+#### `src/workers/lifecycle.rs` — Shared poll loops
+- `run_poll_loop(PollConfig, tick)` — standard job-queue poll loop with exponential backoff on
+  empty queues (identical to the per-worker loops that existed before) and graceful SIGTERM/SIGINT
+  shutdown.
+- `run_interval_loop(interval, task)` — fixed-interval loop for maintenance tasks (reconcile
+  worker). Same signal handling, no backoff.
+
+#### `src/workers/mod.rs`
+- `init_tracing(worker_name)` — initialises the global `tracing` subscriber. Previously
+  copy-pasted into every `main()`.
+
+#### `src/workers/{verify,process,reconcile,upload_completion}/mod.rs`
+- All job-processing logic moved from `src/bin/` into these modules. Each module exposes a `run()`
+  function (and `run_once()` for the reconcile worker's `--once` mode).
+- Job state transitions, SQL queries, lease constants, retry semantics, and Azure calls are
+  preserved verbatim.
+
+### Thinned binary entry points (`src/bin/*.rs`)
+Each binary is now ~30 lines:
+1. `dotenvy::dotenv().ok()`
+2. Parse `Args` with `clap`
+3. `init_tracing()`
+4. `Config::from_env()`
+5. `WorkerContext::new_*()`
+6. `workers::*/run(ctx, config).await`
+
+### `src/config.rs` — Minor cleanup
+- Removed the internal `dotenvy::dotenv().ok()` call from `Config::from_env()`. All callers
+  (all five `main()` functions) already call `dotenvy::dotenv().ok()` before constructing
+  `Config`, so the internal call was redundant.
+
+---
+
+
 ## Database Migrations
 
 ### `migrations/20261021080000_background_jobs.sql`
@@ -27,13 +90,10 @@ Implementation of a complete APK upload workflow with background job processing,
 ## Core Types
 
 ### `src/types/jobs.rs`
-- `JobType` enum: `VerifyApk`, `PrepareDistribution`
+- `JobType` enum: `VerifyApk`, `PrepareDistribution`, `CompleteUpload`
 - `JobStatus` enum: `Pending`, `Processing`, `Completed`, `Failed`
 - `BackgroundJob` struct mapping to database row
 - `JobResponse` for API serialization
-
-### `src/types/outbox.rs`
-- Outbox event payload types for event publishing
 
 ---
 
@@ -52,11 +112,12 @@ Implementation of a complete APK upload workflow with background job processing,
 
 ## API Endpoints
 
-### `src/api/uploads/complete.rs` (new)
-- `POST /uploads/{id}/complete` - Commit Azure blocks, finalize upload
+### `src/api/uploads/upload_complete.rs` (renamed from `uploadComplete.rs`)
+- `POST /uploads/{id}/complete` — accept client-provided SHA-256, enqueue `complete_upload` job
 - Idempotent completion with optional idempotency key
-- Returns verification job ID
-- Transactional: updates upload + inserts verify_apk job
+- Returns job ID and upload status
+- Transactional: sets `PROCESSING_PENDING`, inserts `complete_upload` job atomically
+
 
 ### `src/api/uploads/models.rs`
 - Extended `UploadRecord` with:
@@ -141,6 +202,9 @@ cargo run --bin process_worker -- --poll-interval 10 --worker-id process-1
 # Reconciliation worker (runs every 5 minutes by default)
 cargo run --bin reconcile_worker -- --once  # single run
 cargo run --bin reconcile_worker --        # continuous
+
+# Upload completion worker
+cargo run --bin upload_completion_worker -- --poll-interval 10 --worker-id completion-1
 ```
 
 ## External Dependencies Required

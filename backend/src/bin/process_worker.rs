@@ -1,21 +1,14 @@
 use anyhow::Result;
 use backend::{
-    api::uploads::models::UploadStatus,
     config::Config,
-    db::create_pool,
-    state::AppState,
-    storage::jobs::{claim_job_type, complete_job, fail_job},
-    types::jobs::{BackgroundJob, JobType},
+    workers::{
+        context::WorkerContext,
+        init_tracing,
+        process::{ProcessWorkerConfig, run},
+    },
 };
 use clap::Parser;
-use sqlx::PgPool;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::{signal, time::timeout};
-use tracing::{error, info};
-use tracing_subscriber::EnvFilter;
-
-const PREPARATION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Parser, Debug)]
 #[command(name = "process_worker", about = "Distribution preparation worker")]
@@ -35,209 +28,26 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,process_worker=debug".into()),
-        )
-        .init();
-
-    let args = Args::parse();
-
-    // Load configuration
     dotenvy::dotenv().ok();
+    let args = Args::parse();
+    init_tracing("process_worker");
+
     let config = Config::from_env();
+    // This worker only reads from the database; Azure is not required.
+    let ctx = WorkerContext::new_db_only(&config).await?;
 
-    // Create database pool
-    let pool = create_pool(&config.database_url).await?;
-    info!("Database connected");
-    info!("Database dependency verified");
+    tracing::info!(
+        "Starting distribution preparation worker: {}",
+        args.worker_id
+    );
 
-    let state = Arc::new(AppState { db: pool });
-
-    info!("Starting distribution preparation worker: {}", args.worker_id);
-
-    run_worker(state, args).await?;
-
-    Ok(())
-}
-
-async fn run_worker(
-    state: Arc<AppState>,
-    args: Args,
-) -> Result<()> {
-    let mut empty_polls = 0u32;
-    let mut shutdown = false;
-
-    // Handle shutdown signals
-    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
-    let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt())?;
-
-    while !shutdown {
-        tokio::select! {
-            _ = sigterm.recv() => {
-                info!("Received SIGTERM, shutting down...");
-                shutdown = true;
-            }
-            _ = sigint.recv() => {
-                info!("Received SIGINT, shutting down...");
-                shutdown = true;
-            }
-            _ = tokio::time::sleep(Duration::from_secs(args.poll_interval)) => {
-                match claim_job_type(&state, JobType::PrepareDistribution, &args.worker_id).await {
-                    Ok(Some(job)) => {
-                        empty_polls = 0;
-                        info!(job_id = %job.id, file_id = %job.file_id, "Claimed distribution preparation job");
-
-                        let result = match timeout(
-                            PREPARATION_TIMEOUT,
-                            process_preparation_job(&state, &job, &args.worker_id),
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(_) => Err(anyhow::anyhow!(
-                                "distribution preparation timed out after {} minutes",
-                                PREPARATION_TIMEOUT.as_secs() / 60
-                            )),
-                        };
-                        if let Err(e) = result {
-                            error!(job_id = %job.id, error = %e, "Preparation job failed");
-                            fail_job(&state, job.id, &e.to_string(), true).await?;
-                        }
-                    }
-                    Ok(None) => {
-                        empty_polls += 1;
-                        if empty_polls >= args.max_empty_polls {
-                            let backoff = Duration::from_secs(
-                                (args.poll_interval as u64 * 2_u64.pow(empty_polls.min(6))).min(60)
-                            );
-                            info!(empty_polls, backoff_secs = backoff.as_secs(), "No jobs available, backing off");
-                            tokio::time::sleep(backoff).await;
-                        }
-                    }
-                    Err(e) => {
-                        error!(error = %e, "Failed to claim job");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                    }
-                }
-            }
-        }
-    }
-
-    info!("Worker stopped");
-    Ok(())
-}
-
-async fn process_preparation_job(
-    state: &AppState,
-    job: &BackgroundJob,
-    _worker_id: &str,
-) -> Result<()> {
-    let file_id = job.file_id;
-
-    // Get upload record
-    let upload = get_upload_record(&state.db, file_id).await?;
-
-    // Verify upload is in VERIFIED state
-    if upload.status != UploadStatus::Verified {
-        let err = format!("Upload is not in VERIFIED state (current: {:?})", upload.status);
-        fail_job(state, job.id, &err, false).await?;
-        update_upload_failure(&state.db, file_id, &err).await?;
-        return Ok(());
-    }
-
-    info!(job_id = %job.id, file_id = %file_id, blob = %upload.blob_name, "Processing distribution preparation");
-
-    // TODO: Implement actual distribution preparation:
-    // 1. Copy blob to public CDN container
-    // 2. Extract/generate metadata (package name, version, minSdk, etc.)
-    // 3. Create distribution manifest
-    // 4. Update CDN/edge configuration
-    // 5. Notify downstream services
-
-    // For now, just log and mark as ready
-    info!(job_id = %job.id, "Distribution preparation completed (stub)");
-
-    // Update upload status to READY_FOR_DISTRIBUTION
-    update_upload_status(&state.db, file_id, UploadStatus::ReadyForDistribution).await?;
-
-    complete_job(state, job.id).await?;
-    info!(job_id = %job.id, file_id = %file_id, "Distribution preparation completed successfully");
-
-    Ok(())
-}
-
-async fn get_upload_record(
-    db: &PgPool,
-    file_id: uuid::Uuid,
-) -> Result<UploadRecord> {
-    let record = sqlx::query_as::<_, UploadRecord>(
-        r#"
-        SELECT
-            id, user_id, blob_name, original_filename, content_type,
-            status, expected_size_bytes, expires_at
-        FROM uploads
-        WHERE id = $1
-        "#,
+    run(
+        ctx,
+        ProcessWorkerConfig {
+            poll_interval: Duration::from_secs(args.poll_interval),
+            max_empty_polls: args.max_empty_polls,
+            worker_id: args.worker_id,
+        },
     )
-    .bind(file_id)
-    .fetch_optional(db)
-    .await?
-    .ok_or_else(|| anyhow::anyhow!("Upload record not found"))?;
-
-    Ok(record)
-}
-
-#[derive(sqlx::FromRow)]
-struct UploadRecord {
-    id: uuid::Uuid,
-    user_id: uuid::Uuid,
-    blob_name: String,
-    original_filename: String,
-    content_type: String,
-    status: UploadStatus,
-    expected_size_bytes: i64,
-    actual_size_bytes: Option<i64>,
-    etag: Option<String>,
-    checksum_sha256: Option<Vec<u8>>,
-    expires_at: time::OffsetDateTime,
-}
-
-async fn update_upload_status(
-    db: &PgPool,
-    file_id: uuid::Uuid,
-    status: UploadStatus,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE uploads
-        SET status = $1, updated_at = now()
-        WHERE id = $2
-        "#,
-    )
-    .bind(status)
-    .bind(file_id)
-    .execute(db)
-    .await?;
-
-    Ok(())
-}
-
-async fn update_upload_failure(
-    db: &PgPool,
-    file_id: uuid::Uuid,
-    reason: &str,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE uploads
-         SET status = 'FAILED', failure_reason = $1, updated_at = now()
-         WHERE id = $2",
-    )
-    .bind(reason)
-    .bind(file_id)
-    .execute(db)
-    .await?;
-    Ok(())
+    .await
 }

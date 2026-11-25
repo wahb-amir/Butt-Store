@@ -15,8 +15,6 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        dotenvy::dotenv().ok();
-
         Self {
             port: env::var("PORT")
                 .unwrap_or_else(|_| "8080".to_string())

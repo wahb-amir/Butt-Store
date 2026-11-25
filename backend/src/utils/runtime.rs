@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::{env, path::Path};
 
 pub fn require_command(command: &str) -> Result<()> {
@@ -6,7 +6,7 @@ pub fn require_command(command: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("PATH is not set; required command '{command}' cannot be found"))?;
 
     if env::split_paths(&path).any(|directory| {
-        let candidate = Path::new(&directory).join(command);
+        let candidate: std::path::PathBuf = Path::new(&directory).join(command);
         candidate.is_file()
     }) {
         Ok(())

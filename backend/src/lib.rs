@@ -9,3 +9,4 @@ pub mod state;
 pub mod storage;
 pub mod types;
 pub mod utils;
+pub mod workers;

@@ -7,7 +7,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{query, query_as, PgPool, Postgres, Row, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction, query, query_as};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -123,7 +123,7 @@ async fn enqueue_completion_job(
          WHERE id = $1 AND status = 'PENDING'",
     )
     .bind(upload_id)
-        .bind(checksum_sha256)
+    .bind(checksum_sha256)
     .execute(&mut *tx)
     .await
     .map_err(db_err)?;
@@ -145,18 +145,16 @@ async fn enqueue_completion_job(
 
 fn parse_sha256_hex(value: &str) -> Result<Vec<u8>, AppErrorWithMessage> {
     if value.len() != 64 {
-        return Err(AppError::BadRequest.with_message(
-            "checksumSha256 must be a 64-character hexadecimal SHA-256 hash",
-        ));
+        return Err(AppError::BadRequest
+            .with_message("checksumSha256 must be a 64-character hexadecimal SHA-256 hash"));
     }
 
     (0..value.len())
         .step_by(2)
         .map(|index| {
             u8::from_str_radix(&value[index..index + 2], 16).map_err(|_| {
-                AppError::BadRequest.with_message(
-                    "checksumSha256 must be a 64-character hexadecimal SHA-256 hash",
-                )
+                AppError::BadRequest
+                    .with_message("checksumSha256 must be a 64-character hexadecimal SHA-256 hash")
             })
         })
         .collect()

@@ -3,6 +3,7 @@ name = "backend"
 version = "0.1.0"
 edition = "2024"
 
+
 [[bin]]
 name = "verify_worker"
 path = "src/bin/verify_worker.rs"
